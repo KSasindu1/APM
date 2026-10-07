@@ -21,11 +21,17 @@ class Settings(BaseSettings):
     # PostgreSQL
     # ---------------------------------------------------------
 
+    # PostgreSQL is currently used for integration with the
+    # Planning & Scheduling Agent.
+    #
+    # It is optional during independent development of the
+    # Risk & Knowledge Agent because document-based retrieval
+    # does not require PostgreSQL.
+    #
     # Example:
     # postgresql+psycopg://username:password@localhost:5432/projectflow
-    #
-    # This should be placed in .env.
-    postgres_database_url: str
+
+    postgres_database_url: str | None = None
 
     # Maximum number of PostgreSQL records returned during search.
     postgres_search_limit: int = 20
