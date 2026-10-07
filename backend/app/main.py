@@ -6,16 +6,27 @@ import webbrowser
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.risks import router as risk_router
+
 
 def open_swagger():
-    # Give Uvicorn a moment to start before opening the browser
+    """
+    Open Swagger UI after FastAPI starts.
+    """
+
     time.sleep(1.5)
-    webbrowser.open("http://127.0.0.1:8000/docs")
+
+    webbrowser.open(
+        "http://127.0.0.1:8000/docs"
+    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Open Swagger automatically when FastAPI starts
+    """
+    Application lifecycle.
+    """
+
     threading.Thread(
         target=open_swagger,
         daemon=True,
@@ -26,7 +37,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Agentic Project Management System",
-    description="AI-powered multi-agent project management system",
+    description=(
+        "AI-powered multi-agent project management "
+        "system with Risk & Knowledge Retrieval."
+    ),
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -34,17 +48,30 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+# ---------------------------------------------------------
+# Risk & Knowledge Retrieval Agent
+# ---------------------------------------------------------
+
+app.include_router(
+    risk_router
+)
+
+
 @app.get("/")
 async def root():
     return {
-        "message": "Agentic Project Management System API",
+        "message": (
+            "Agentic Project Management System API"
+        ),
         "status": "running",
         "version": "0.1.0",
     }
@@ -55,4 +82,3 @@ async def health():
     return {
         "status": "healthy",
     }
-
