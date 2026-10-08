@@ -1,9 +1,29 @@
-import "./App.css";
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Link,
+} from "react-router-dom";
 
-function App() {
+import Dashboard from "./pages/Dashboard";
+import Planning from "./pages/Planning";
+import Schedule from "./pages/Schedule";
+
+import "./App.css";
+import "./pages.css";
+
+// ============================================================
+// Landing Page
+// ============================================================
+
+function LandingPage() {
   return (
     <div className="app">
-      {/* ==================== NAVBAR ==================== */}
+
+      {/* ======================================================
+          NAVBAR
+          ====================================================== */}
+
       <header className="navbar">
         <div className="brand">
           <div className="brand-logo">AP</div>
@@ -15,19 +35,41 @@ function App() {
         </div>
 
         <nav className="nav-links">
-          <a href="#home">Home</a>
-          <a href="#features">Features</a>
-          <a href="#agents">AI Agents</a>
-          <a href="#about">About</a>
+          <Link to="/">Home</Link>
+
+          <a href="#features">
+            Features
+          </a>
+
+          <a href="#agents">
+            AI Agents
+          </a>
+
+          <a href="#about">
+            About
+          </a>
         </nav>
 
-        <button className="nav-button">Get Started</button>
+        <Link
+          to="/dashboard"
+          className="nav-button"
+        >
+          Get Started
+        </Link>
       </header>
 
-      {/* ==================== HERO ==================== */}
       <main>
-        <section className="hero" id="home">
+
+        {/* ====================================================
+            HERO
+            ==================================================== */}
+
+        <section
+          className="hero"
+          id="home"
+        >
           <div className="hero-content">
+
             <div className="badge">
               <span className="badge-dot"></span>
               AI-POWERED PROJECT MANAGEMENT
@@ -35,25 +77,40 @@ function App() {
 
             <h2>
               Manage Projects
-              <span>Smarter with AI Agents.</span>
+              <span>
+                Smarter with AI Agents.
+              </span>
             </h2>
 
             <p className="hero-description">
-              APM is an intelligent multi-agent project management system
-              designed to help teams plan projects, identify risks, retrieve
-              knowledge, monitor progress, and generate intelligent reports.
+              APM is an intelligent multi-agent project
+              management system designed to help teams
+              plan projects, identify risks, retrieve
+              knowledge, monitor progress, and generate
+              intelligent reports.
             </p>
 
             <div className="hero-actions">
-              <button className="primary-button">Get Started</button>
 
-              <a href="#agents" className="secondary-button">
+              <Link
+                to="/dashboard"
+                className="primary-button"
+              >
+                Get Started
+              </Link>
+
+              <a
+                href="#agents"
+                className="secondary-button"
+              >
                 Explore AI Agents
                 <span>→</span>
               </a>
+
             </div>
 
             <div className="hero-stats">
+
               <div className="stat">
                 <strong>4</strong>
                 <span>AI Agents</span>
@@ -72,368 +129,691 @@ function App() {
                 <strong>AI</strong>
                 <span>Powered</span>
               </div>
+
             </div>
+
           </div>
 
-          {/* Dashboard preview */}
+          {/* ==================================================
+              DASHBOARD PREVIEW
+              ================================================== */}
+
           <div className="hero-visual">
+
             <div className="glow"></div>
 
             <div className="dashboard-card">
+
               <div className="dashboard-header">
+
                 <div>
-                  <span className="dashboard-label">PROJECT OVERVIEW</span>
-                  <h3>Website Development</h3>
+                  <span className="dashboard-label">
+                    PROJECT OVERVIEW
+                  </span>
+
+                  <h3>
+                    Website Development
+                  </h3>
                 </div>
 
                 <span className="active-status">
                   <span></span>
                   Active
                 </span>
+
               </div>
 
               <div className="progress-area">
+
                 <div className="progress-header">
-                  <span>Project Progress</span>
-                  <strong>72%</strong>
+                  <span>
+                    Project Progress
+                  </span>
+
+                  <strong>
+                    72%
+                  </strong>
                 </div>
 
                 <div className="progress-track">
                   <div className="progress-fill"></div>
                 </div>
+
               </div>
 
               <div className="dashboard-metrics">
+
                 <div className="metric">
                   <span>Tasks</span>
                   <strong>24</strong>
-                  <small>+8 this week</small>
+                  <small>
+                    +8 this week
+                  </small>
                 </div>
 
                 <div className="metric">
                   <span>Risks</span>
-                  <strong className="warning">3</strong>
-                  <small>Needs attention</small>
+                  <strong className="warning">
+                    3
+                  </strong>
+                  <small>
+                    Needs attention
+                  </small>
                 </div>
 
                 <div className="metric">
                   <span>Team</span>
                   <strong>12</strong>
-                  <small>Members</small>
+                  <small>
+                    Members
+                  </small>
                 </div>
+
               </div>
 
               <div className="agent-monitor">
+
                 <div className="monitor-title">
-                  <span>AI Agent Activity</span>
-                  <span className="live">LIVE</span>
-                </div>
+                  <span>
+                    AI Agent Activity
+                  </span>
 
-                <div className="agent-row">
-                  <div className="agent-icon coordinator">C</div>
-                  <div className="agent-info">
-                    <strong>Coordinator Agent</strong>
-                    <span>Managing project workflow</span>
-                  </div>
-                  <span className="agent-status working">Working</span>
-                </div>
-
-                <div className="agent-row">
-                  <div className="agent-icon planning">P</div>
-                  <div className="agent-info">
-                    <strong>Planning Agent</strong>
-                    <span>Optimizing project schedule</span>
-                  </div>
-                  <span className="agent-status working">Working</span>
-                </div>
-
-                <div className="agent-row">
-                  <div className="agent-icon risk">R</div>
-                  <div className="agent-info">
-                    <strong>Risk Agent</strong>
-                    <span>Analyzing project risks</span>
-                  </div>
-                  <span className="agent-status analyzing">
-                    Analyzing
+                  <span className="live">
+                    LIVE
                   </span>
                 </div>
 
                 <div className="agent-row">
-                  <div className="agent-icon report">M</div>
-                  <div className="agent-info">
-                    <strong>Monitor & Report Agent</strong>
-                    <span>Ready for reporting</span>
+
+                  <div className="agent-icon coordinator">
+                    C
                   </div>
-                  <span className="agent-status ready">Ready</span>
+
+                  <div className="agent-info">
+
+                    <strong>
+                      Coordinator Agent
+                    </strong>
+
+                    <span>
+                      Managing project workflow
+                    </span>
+
+                  </div>
+
+                  <span className="agent-status working">
+                    Working
+                  </span>
+
                 </div>
+
+                <div className="agent-row">
+
+                  <div className="agent-icon planning">
+                    P
+                  </div>
+
+                  <div className="agent-info">
+
+                    <strong>
+                      Planning Agent
+                    </strong>
+
+                    <span>
+                      Optimizing project schedule
+                    </span>
+
+                  </div>
+
+                  <span className="agent-status working">
+                    Working
+                  </span>
+
+                </div>
+
+                <div className="agent-row">
+
+                  <div className="agent-icon risk">
+                    R
+                  </div>
+
+                  <div className="agent-info">
+
+                    <strong>
+                      Risk Agent
+                    </strong>
+
+                    <span>
+                      Analyzing project risks
+                    </span>
+
+                  </div>
+
+                  <span className="agent-status analyzing">
+                    Analyzing
+                  </span>
+
+                </div>
+
+                <div className="agent-row">
+
+                  <div className="agent-icon report">
+                    M
+                  </div>
+
+                  <div className="agent-info">
+
+                    <strong>
+                      Monitor & Report Agent
+                    </strong>
+
+                    <span>
+                      Ready for reporting
+                    </span>
+
+                  </div>
+
+                  <span className="agent-status ready">
+                    Ready
+                  </span>
+
+                </div>
+
               </div>
+
             </div>
+
           </div>
+
         </section>
 
-        {/* ==================== FEATURES ==================== */}
-        <section className="features-section" id="features">
+        {/* ====================================================
+            FEATURES
+            ==================================================== */}
+
+        <section
+          className="features-section"
+          id="features"
+        >
           <div className="section-header">
-            <div className="badge">CORE CAPABILITIES</div>
+
+            <div className="badge">
+              CORE CAPABILITIES
+            </div>
 
             <h2>
               Everything your project needs,
-              <span>powered by intelligence.</span>
+              <span>
+                powered by intelligence.
+              </span>
             </h2>
 
             <p>
-              APM combines artificial intelligence, information retrieval,
-              natural language processing, and multi-agent collaboration to
-              support your project from planning to completion.
+              APM combines artificial intelligence,
+              information retrieval, natural language
+              processing, and multi-agent collaboration
+              to support your project from planning to
+              completion.
             </p>
+
           </div>
 
           <div className="feature-grid">
-            <div className="feature-card">
-              <div className="feature-number blue">01</div>
 
-              <h3>Smart Planning</h3>
+            <div className="feature-card">
+
+              <div className="feature-number blue">
+                01
+              </div>
+
+              <h3>
+                Smart Planning
+              </h3>
 
               <p>
-                Automatically create project plans, tasks, milestones,
-                dependencies, and schedules from natural language
+                Automatically create project plans,
+                tasks, milestones, dependencies, and
+                schedules from natural language
                 requirements.
               </p>
 
-              <span className="feature-link">Learn more →</span>
+              <Link
+                to="/planning"
+                className="feature-link"
+              >
+                Open Planning →
+              </Link>
+
             </div>
 
             <div className="feature-card">
-              <div className="feature-number purple">02</div>
 
-              <h3>Risk Detection</h3>
+              <div className="feature-number purple">
+                02
+              </div>
+
+              <h3>
+                Risk Detection
+              </h3>
 
               <p>
-                Detect potential project risks and provide intelligent
-                recommendations for mitigation and decision-making.
+                Detect potential project risks and
+                provide intelligent recommendations
+                for mitigation and decision-making.
               </p>
 
-              <span className="feature-link">Learn more →</span>
+              <span className="feature-link">
+                Learn more →
+              </span>
+
             </div>
 
             <div className="feature-card">
-              <div className="feature-number green">03</div>
 
-              <h3>Knowledge Retrieval</h3>
+              <div className="feature-number green">
+                03
+              </div>
+
+              <h3>
+                Knowledge Retrieval
+              </h3>
 
               <p>
-                Retrieve relevant information from project documents,
-                knowledge bases, and historical project data.
+                Retrieve relevant information from
+                project documents, knowledge bases,
+                and historical project data.
               </p>
 
-              <span className="feature-link">Learn more →</span>
+              <span className="feature-link">
+                Learn more →
+              </span>
+
             </div>
 
             <div className="feature-card">
-              <div className="feature-number orange">04</div>
 
-              <h3>Monitoring & Reports</h3>
+              <div className="feature-number orange">
+                04
+              </div>
+
+              <h3>
+                Monitoring & Reports
+              </h3>
 
               <p>
-                Monitor project health and automatically generate progress
-                summaries, insights, and management reports.
+                Monitor project health and automatically
+                generate progress summaries, insights,
+                and management reports.
               </p>
 
-              <span className="feature-link">Learn more →</span>
+              <Link
+                to="/schedule"
+                className="feature-link"
+              >
+                View Schedule →
+              </Link>
+
             </div>
+
           </div>
         </section>
 
-        {/* ==================== AI AGENTS ==================== */}
-        <section className="agents-section" id="agents">
+        {/* ====================================================
+            AI AGENTS
+            ==================================================== */}
+
+        <section
+          className="agents-section"
+          id="agents"
+        >
           <div className="section-header dark">
-            <div className="badge dark-badge">MULTI-AGENT SYSTEM</div>
+
+            <div className="badge dark-badge">
+              MULTI-AGENT SYSTEM
+            </div>
 
             <h2>
               Meet your
-              <span>AI project team.</span>
+              <span>
+                AI project team.
+              </span>
             </h2>
 
             <p>
-              Specialized intelligent agents collaborate through defined
-              communication protocols to solve complex project management
-              tasks.
+              Specialized intelligent agents collaborate
+              through defined communication protocols to
+              solve complex project management tasks.
             </p>
+
           </div>
 
           <div className="agents-grid">
+
             <div className="agent-card">
-              <div className="large-agent-icon coordinator">01</div>
 
-              <span className="agent-label">COORDINATION</span>
+              <div className="large-agent-icon coordinator">
+                01
+              </div>
 
-              <h3>Decision & Coordinator Agent</h3>
+              <span className="agent-label">
+                COORDINATION
+              </span>
+
+              <h3>
+                Decision & Coordinator Agent
+              </h3>
 
               <p>
-                Understands user requests, makes decisions, and coordinates
-                activities between the specialized AI agents.
+                Understands user requests, makes decisions,
+                and coordinates activities between the
+                specialized AI agents.
               </p>
 
-              <div className="agent-tech">LLM • A2A • API</div>
+              <div className="agent-tech">
+                LLM • A2A • API
+              </div>
+
             </div>
 
             <div className="agent-card">
-              <div className="large-agent-icon planning">02</div>
 
-              <span className="agent-label">PLANNING</span>
+              <div className="large-agent-icon planning">
+                02
+              </div>
 
-              <h3>Planning & Scheduling Agent</h3>
+              <span className="agent-label">
+                PLANNING
+              </span>
+
+              <h3>
+                Planning & Scheduling Agent
+              </h3>
 
               <p>
-                Creates project plans, schedules tasks, manages dependencies,
-                and helps optimize resource allocation.
+                Creates project plans, schedules tasks,
+                manages dependencies, and helps optimize
+                resource allocation.
               </p>
 
-              <div className="agent-tech">LLM • NLP • Scheduling</div>
+              <div className="agent-tech">
+                LLM • NLP • Scheduling
+              </div>
+
             </div>
 
             <div className="agent-card">
-              <div className="large-agent-icon risk">03</div>
 
-              <span className="agent-label">RISK & KNOWLEDGE</span>
+              <div className="large-agent-icon risk">
+                03
+              </div>
 
-              <h3>Risk & Knowledge Retrieval Agent</h3>
+              <span className="agent-label">
+                RISK & KNOWLEDGE
+              </span>
+
+              <h3>
+                Risk & Knowledge Retrieval Agent
+              </h3>
 
               <p>
-                Searches project knowledge and identifies risks using
-                information retrieval and intelligent analysis.
+                Searches project knowledge and identifies
+                risks using information retrieval and
+                intelligent analysis.
               </p>
 
-              <div className="agent-tech">RAG • NLP • IR</div>
+              <div className="agent-tech">
+                RAG • NLP • IR
+              </div>
+
             </div>
 
             <div className="agent-card">
-              <div className="large-agent-icon report">04</div>
 
-              <span className="agent-label">MONITORING</span>
+              <div className="large-agent-icon report">
+                04
+              </div>
 
-              <h3>Monitor & Report Agent</h3>
+              <span className="agent-label">
+                MONITORING
+              </span>
+
+              <h3>
+                Monitor & Report Agent
+              </h3>
 
               <p>
-                Tracks project progress and transforms project information
-                into useful reports and management insights.
+                Tracks project progress and transforms
+                project information into useful reports
+                and management insights.
               </p>
 
-              <div className="agent-tech">LLM • Analytics • Reports</div>
+              <div className="agent-tech">
+                LLM • Analytics • Reports
+              </div>
+
             </div>
+
           </div>
         </section>
 
-        {/* ==================== HOW IT WORKS ==================== */}
+        {/* ====================================================
+            WORKFLOW
+            ==================================================== */}
+
         <section className="workflow-section">
+
           <div className="section-header">
-            <div className="badge">HOW APM WORKS</div>
+
+            <div className="badge">
+              HOW APM WORKS
+            </div>
 
             <h2>
               One request.
-              <span>Multiple intelligent agents.</span>
+              <span>
+                Multiple intelligent agents.
+              </span>
             </h2>
 
             <p>
-              APM coordinates specialized agents to transform your request
-              into actionable project intelligence.
+              APM coordinates specialized agents to
+              transform your request into actionable
+              project intelligence.
             </p>
+
           </div>
 
           <div className="workflow">
-            <div className="workflow-step">
-              <div className="workflow-number">01</div>
 
-              <h3>User Request</h3>
+            <div className="workflow-step">
+
+              <div className="workflow-number">
+                01
+              </div>
+
+              <h3>
+                User Request
+              </h3>
 
               <p>
-                The project manager provides a request using natural
-                language.
+                The project manager provides a request
+                using natural language.
               </p>
+
             </div>
 
             <div className="workflow-line"></div>
 
             <div className="workflow-step">
-              <div className="workflow-number">02</div>
 
-              <h3>Coordinator</h3>
+              <div className="workflow-number">
+                02
+              </div>
+
+              <h3>
+                Coordinator
+              </h3>
 
               <p>
-                The coordinator analyzes the request and selects the required
-                agents.
+                The coordinator analyzes the request
+                and selects the required agents.
               </p>
+
             </div>
 
             <div className="workflow-line"></div>
 
             <div className="workflow-step">
-              <div className="workflow-number">03</div>
 
-              <h3>Agent Collaboration</h3>
+              <div className="workflow-number">
+                03
+              </div>
+
+              <h3>
+                Agent Collaboration
+              </h3>
 
               <p>
-                Specialized agents communicate and perform their assigned
-                tasks.
+                Specialized agents communicate and
+                perform their assigned tasks.
               </p>
+
             </div>
 
             <div className="workflow-line"></div>
 
             <div className="workflow-step">
-              <div className="workflow-number">04</div>
 
-              <h3>Result</h3>
+              <div className="workflow-number">
+                04
+              </div>
+
+              <h3>
+                Result
+              </h3>
 
               <p>
-                APM combines the results and provides an intelligent response
-                to the user.
+                APM combines the results and provides
+                an intelligent response to the user.
               </p>
+
             </div>
+
           </div>
+
         </section>
 
-        {/* ==================== CTA ==================== */}
-        <section className="cta-section" id="about">
+        {/* ====================================================
+            CTA
+            ==================================================== */}
+
+        <section
+          className="cta-section"
+          id="about"
+        >
           <div className="cta-content">
-            <div className="badge cta-badge">AGENTIC AI</div>
+
+            <div className="badge cta-badge">
+              AGENTIC AI
+            </div>
 
             <h2>
               Build better projects
-              <span>with intelligent automation.</span>
+              <span>
+                with intelligent automation.
+              </span>
             </h2>
 
             <p>
-              Let your AI project team handle complexity while your human team
-              focuses on delivering successful projects.
+              Let your AI project team handle complexity
+              while your human team focuses on delivering
+              successful projects.
             </p>
 
-            <button className="primary-button cta-button">
+            <Link
+              to="/dashboard"
+              className="primary-button cta-button"
+            >
               Launch APM
               <span>→</span>
-            </button>
+            </Link>
+
           </div>
         </section>
+
       </main>
 
-      {/* ==================== FOOTER ==================== */}
+      {/* ======================================================
+          FOOTER
+          ====================================================== */}
+
       <footer className="footer">
+
         <div className="footer-brand">
-          <div className="brand-logo">AP</div>
+
+          <div className="brand-logo">
+            AP
+          </div>
 
           <div>
             <strong>APM</strong>
-            <span>Agentic Project Management System</span>
+
+            <span>
+              Agentic Project Management System
+            </span>
           </div>
+
         </div>
 
         <p>
           © 2026 APM. Built with React, FastAPI & Agentic AI.
         </p>
+
       </footer>
+
     </div>
   );
 }
 
-export default App;
+// ============================================================
+// Application Routes
+// ============================================================
 
+function App() {
+  return (
+    <BrowserRouter>
+
+      <Routes>
+
+        <Route
+          path="/"
+          element={<LandingPage />}
+        />
+
+        <Route
+          path="/dashboard"
+          element={<Dashboard />}
+        />
+
+        <Route
+          path="/planning"
+          element={<Planning />}
+        />
+
+        <Route
+          path="/schedule"
+          element={<Schedule />}
+        />
+
+        <Route
+          path="/schedule/:projectId"
+          element={<Schedule />}
+        />
+
+      </Routes>
+
+    </BrowserRouter>
+  );
+}
+
+export default App;
