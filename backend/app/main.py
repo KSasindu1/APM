@@ -1,58 +1,103 @@
+from __future__ import annotations
+
+import logging
 from contextlib import asynccontextmanager
-import threading
-import time
-import webbrowser
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.planning import (
+    router as planning_router,
+)
+from app.core.config import (
+    get_settings,
+    validate_configuration,
+)
 
-def open_swagger():
-    # Give Uvicorn a moment to start before opening the browser
-    time.sleep(1.5)
-    webbrowser.open("http://127.0.0.1:8000/docs")
+
+logging.basicConfig(
+    level=logging.INFO,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Open Swagger automatically when FastAPI starts
-    threading.Thread(
-        target=open_swagger,
-        daemon=True,
-    ).start()
+async def lifespan(
+    app: FastAPI,
+):
+
+    try:
+
+        validate_configuration()
+
+        logger.info(
+            "Application configuration validated."
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Application configuration validation failed."
+        )
+
+        raise
+
+    logger.info(
+        "Application startup complete."
+    )
 
     yield
+
+    logger.info(
+        "Application shutdown."
+    )
+
+
+settings = get_settings()
 
 
 app = FastAPI(
     title="Agentic Project Management System",
-    description="AI-powered multi-agent project management system",
-    version="0.1.0",
+    description=(
+        "AI-powered multi-agent project management system"
+    ),
+    version="1.0.0",
     lifespan=lifespan,
 )
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=list(
+        settings.cors_origins
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+app.include_router(
+    planning_router
+)
+
+
 @app.get("/")
 async def root():
+
     return {
-        "message": "Agentic Project Management System API",
+        "message": (
+            "Agentic Project Management System API"
+        ),
         "status": "running",
-        "version": "0.1.0",
+        "version": "1.0.0",
     }
 
 
 @app.get("/health")
 async def health():
+
     return {
         "status": "healthy",
     }
-
