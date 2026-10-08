@@ -1,3 +1,4 @@
+
 import json
 
 from groq import Groq
@@ -49,6 +50,15 @@ class LLMService:
                                 "items": {
                                     "type": "object",
                                     "properties": {
+                                        "risk_id": {
+                                            "type": "string"
+                                        },
+                                        "task_id": {
+                                            "type": [
+                                                "string",
+                                                "null"
+                                            ]
+                                        },
                                         "risk": {
                                             "type": "string"
                                         },
@@ -58,8 +68,17 @@ class LLMService:
                                         "risk_level": {
                                             "type": "string"
                                         },
+                                        "impact_days": {
+                                            "type": [
+                                                "integer",
+                                                "null"
+                                            ],
+                                            "minimum": 0
+                                        },
                                         "confidence": {
-                                            "type": "number"
+                                            "type": "number",
+                                            "minimum": 0,
+                                            "maximum": 1
                                         },
                                         "evidence": {
                                             "type": "string"
@@ -75,9 +94,12 @@ class LLMService:
                                         },
                                     },
                                     "required": [
+                                        "risk_id",
+                                        "task_id",
                                         "risk",
                                         "description",
                                         "risk_level",
+                                        "impact_days",
                                         "confidence",
                                         "evidence",
                                         "source",
@@ -112,6 +134,8 @@ class LLMService:
         content = response.choices[0].message.content
 
         if not content:
-            raise RuntimeError("The LLM returned an empty response.")
+            raise RuntimeError(
+                "The LLM returned an empty response."
+            )
 
         return json.loads(content)

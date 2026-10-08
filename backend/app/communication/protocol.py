@@ -1,3 +1,4 @@
+
 from app.agents.risk_knowledge.agent import RiskKnowledgeAgent
 from app.communication.messages import (
     KnowledgeSearchMessage,
@@ -8,12 +9,16 @@ from app.communication.messages import (
 
 class RiskAgentProtocol:
     """
-    Internal communication protocol for the Risk & Knowledge Agent.
+    Communication interface for the Risk & Knowledge Retrieval Agent.
 
-    Other agents can use this interface to send:
-    - newly created project plans
-    - risk-analysis requests
-    - knowledge-search requests
+    Supports:
+    - Planning Agent -> Risk Agent project-plan messages
+    - Other agents -> Risk Agent risk-analysis requests
+    - Other agents -> Risk Agent knowledge-search requests
+
+    Communication is performed through the API layer.
+    This class handles the message after it reaches the
+    Risk Agent backend.
     """
 
     def __init__(
@@ -27,23 +32,61 @@ class RiskAgentProtocol:
         message: ProjectPlanMessage,
     ):
         """
-        Analyse a newly created plan received from the
-        Planning & Scheduling Agent.
+        Process a structured project plan received from
+        the Planning & Scheduling Agent.
 
-        The plan can be analysed immediately while the Planning
-        Agent also stores its official version in PostgreSQL.
+        The structured planning information is converted into
+        project context for the Risk Agent's existing RAG,
+        NLP, retrieval, and LLM pipeline.
         """
+
+        project_information_parts = []
+
+        if message.project_name:
+            project_information_parts.append(
+                f"Project name: {message.project_name}"
+            )
+
+        if message.objective:
+            project_information_parts.append(
+                f"Project objective: {message.objective}"
+            )
+
+        if message.project_dates:
+            project_information_parts.append(
+                f"Project dates: {message.project_dates}"
+            )
+
+        if message.tasks:
+            project_information_parts.append(
+                f"Project tasks: {message.tasks}"
+            )
+
+        if message.critical_path:
+            project_information_parts.append(
+                f"Critical path: {message.critical_path}"
+            )
+
+        if message.critical_path_duration_days is not None:
+            project_information_parts.append(
+                "Critical path duration: "
+                f"{message.critical_path_duration_days} days"
+            )
+
+        project_information = "\n".join(
+            project_information_parts
+        )
 
         return self.agent.analyse_project(
             project_id=message.project_id,
-            project_information=(
-                f"Plan title: {message.plan_title}\n\n"
-                f"Plan content:\n{message.plan_content}"
-            ),
+            project_information=project_information,
             query=(
-                "Identify risks, dependencies, "
-                "timeline issues, resource constraints, "
-                "and inconsistencies in this project plan."
+                "Identify project risks in the newly created "
+                "project plan. Analyse task dependencies, "
+                "critical-path risks, timeline issues, "
+                "resource constraints, inconsistencies, "
+                "and risks supported by the existing project "
+                "knowledge."
             ),
         )
 
@@ -52,15 +95,17 @@ class RiskAgentProtocol:
         request: RiskRequestMessage,
     ):
         """
-        Analyse a project using documents, PostgreSQL planning
-        information, and current agent-provided information.
+        Analyse a project using the existing Risk Agent
+        contract.
+
+        This method is intentionally unchanged in behaviour
+        so existing Monitoring Agent integration remains
+        compatible.
         """
 
         return self.agent.analyse_project(
             project_id=request.project_id,
-            project_information=(
-                request.project_information
-            ),
+            project_information=request.project_information,
             query=request.query,
             top_k=request.top_k,
         )

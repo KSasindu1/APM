@@ -1,24 +1,51 @@
+
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
 class ProjectPlanMessage(BaseModel):
     """
-    Message that the Planning Agent can send to the
-    Risk & Knowledge Agent.
+    Structured project-plan message sent by the
+    Planning & Scheduling Agent to the
+    Risk & Knowledge Retrieval Agent.
 
-    The plan is also stored in PostgreSQL by the Planning Agent.
+    The Planning Agent can also store the official plan
+    in PostgreSQL. This message provides the current plan
+    information directly to the Risk Agent.
     """
 
+    sender: str = "planning_agent"
+    receiver: str = "risk_knowledge_agent"
+    action: str = "ASSESS_PROJECT_RISKS"
+    request_id: str = ""
+
     project_id: str
-    source_agent: str
-    plan_title: str
-    plan_content: str
+    project_name: str = ""
+    objective: str = ""
+
+    project_dates: dict[str, Any] = Field(
+        default_factory=dict,
+    )
+
+    tasks: list[dict[str, Any]] = Field(
+        default_factory=list,
+    )
+
+    critical_path: list[str] = Field(
+        default_factory=list,
+    )
+
+    critical_path_duration_days: int | None = None
 
 
 class RiskRequestMessage(BaseModel):
     """
     Request from another ProjectFlow AI agent asking the
-    Risk & Knowledge Agent to analyse a project.
+    Risk & Knowledge Retrieval Agent to analyse a project.
+
+    This contract is kept compatible with the existing
+    Monitoring Agent integration.
     """
 
     project_id: str
