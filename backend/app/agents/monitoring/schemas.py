@@ -4,16 +4,16 @@ Dates are project-local calendar dates; percentages use the 0..100 scale.
 """
 
 from datetime import date, datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")]
 Percentage = Annotated[float, Field(ge=0, le=100, allow_inf_nan=False)]
 
 
 class MonitoringModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, revalidate_instances="always")
 
 
 class PlannedTask(MonitoringModel):
@@ -44,9 +44,12 @@ class PlannedMilestone(MonitoringModel):
 
 class PlanningSnapshot(MonitoringModel):
     project_id: Identifier
-    updated_on: date
+    updated_on: date | None = None
+    fetched_on: date | None = None
     tasks: list[PlannedTask] = Field(default_factory=list, max_length=10000)
     milestones: list[PlannedMilestone] = Field(default_factory=list, max_length=1000)
+    context: dict[str, JsonValue] = Field(default_factory=dict)
+    limitations: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def valid_references(self):
@@ -85,6 +88,7 @@ class ActualTask(MonitoringModel):
     progress: Percentage
     updated_on: date
     completed_on: date | None = None
+    actual_start: date | None = None
 
     @model_validator(mode="after")
     def consistent_completion(self):
@@ -97,6 +101,11 @@ class ActualTask(MonitoringModel):
             raise ValueError("Only completed tasks can have completed_on or 100% progress")
         if self.status == "not_started" and self.progress != 0:
             raise ValueError("Not-started tasks must have zero progress")
+        if self.actual_start is not None:
+            if self.status == "not_started" or self.actual_start > self.updated_on:
+                raise ValueError("Actual start must belong to a started task and not postdate its update")
+            if self.completed_on is not None and self.actual_start > self.completed_on:
+                raise ValueError("Actual start cannot be after completion")
         return self
 
 
@@ -110,7 +119,8 @@ class KnowledgeDocument(MonitoringModel):
 
 class ActualProjectSnapshot(MonitoringModel):
     project_id: Identifier
-    updated_on: date
+    updated_on: date | None = None
+    observed_on: date | None = None
     tasks: list[ActualTask] = Field(default_factory=list, max_length=10000)
     updates: list[KnowledgeDocument] = Field(default_factory=list, max_length=1000)
 
@@ -118,6 +128,12 @@ class ActualProjectSnapshot(MonitoringModel):
     def consistent_records(self):
         if len({t.task_id for t in self.tasks}) != len(self.tasks):
             raise ValueError("Duplicate actual task IDs")
+        if self.updated_on is None:
+            if self.tasks or self.updates:
+                raise ValueError("Actual records require a snapshot observation date")
+            return self
+        if self.observed_on is not None and self.updated_on > self.observed_on:
+            raise ValueError("Actual snapshot cannot postdate its observation")
         if any(t.updated_on > self.updated_on for t in self.tasks):
             raise ValueError("Task update cannot be newer than its snapshot")
         if any(d.project_id != self.project_id or d.recorded_on > self.updated_on for d in self.updates):
@@ -131,6 +147,13 @@ class ProjectRisk(MonitoringModel):
     level: Literal["low", "medium", "high", "critical"]
     status: Literal["open", "mitigated", "closed"] = "open"
     task_ids: list[Identifier] = Field(default_factory=list)
+    risk: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    evidence: str | list[str] = Field(default_factory=list)
+    source: str | None = None
+    affected_area: str | None = None
+    recommended_action: str | None = None
+    impact_days: int | None = Field(default=None, ge=0)
 
 
 class RiskSnapshot(MonitoringModel):
@@ -138,6 +161,9 @@ class RiskSnapshot(MonitoringModel):
     updated_on: date
     risks: list[ProjectRisk] = Field(default_factory=list, max_length=1000)
     knowledge: list[KnowledgeDocument] = Field(default_factory=list, max_length=1000)
+    summary: str = ""
+    evidence_used: list[JsonValue] = Field(default_factory=list)
+    knowledge_sources: list[JsonValue] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def consistent_records(self):
@@ -147,11 +173,6 @@ class RiskSnapshot(MonitoringModel):
             raise ValueError("Knowledge must belong to this project and snapshot date")
         return self
 
-
-class MonitoringFixture(MonitoringModel):
-    planning: PlanningSnapshot
-    actual: ActualProjectSnapshot
-    risk: RiskSnapshot | None = None
 
 
 class MonitoringRequest(MonitoringModel):
@@ -198,6 +219,10 @@ class TaskAssessment(MonitoringModel):
     completed_late_days: int
     delayed: bool = False
     dependency_delayed: bool = False
+    start_delay_days: int = 0
+    planned_deadline_passed: bool = False
+    actual_is_stale: bool = False
+    last_observed_progress: float | None = None
 
 
 class MilestoneAssessment(MonitoringModel):
@@ -210,6 +235,7 @@ class MilestoneAssessment(MonitoringModel):
 
 
 class MonitoringMetrics(MonitoringModel):
+    stale_actual_tasks: int = 0
     total_tasks: int
     completed_tasks: int
     missing_actual_tasks: int
@@ -243,6 +269,14 @@ class SummarySelection(MonitoringModel):
     fact_ids: list[str] = Field(min_length=1, max_length=8)
 
 
+class PlanningFeedbackMessage(MonitoringModel):
+    sender: Literal["project_monitor_report_agent"] = "project_monitor_report_agent"
+    receiver: Literal["planning_agent"] = "planning_agent"
+    action: Literal["SCHEDULE_DELAY_DETECTED"] = "SCHEDULE_DELAY_DETECTED"
+    request_id: str
+    data: dict[str, JsonValue]
+
+
 class MonitoringReport(MonitoringModel):
     schema_version: Literal["1.0"] = "1.0"
     report_id: str
@@ -263,6 +297,12 @@ class MonitoringReport(MonitoringModel):
     summary_method: Literal["deterministic_extractive", "llm_extractive"]
     limitations: list[str]
     suggested_actions: list[str]
+    risks: list[ProjectRisk] = Field(default_factory=list)
+    risk_summary: str = ""
+    risk_evidence_used: list[JsonValue] = Field(default_factory=list)
+    risk_knowledge_sources: list[JsonValue] = Field(default_factory=list)
+    planning_context: dict[str, JsonValue] = Field(default_factory=dict)
+    planning_feedback: list[PlanningFeedbackMessage] = Field(default_factory=list)
     human_review_required: Literal[True] = True
 
 
@@ -273,3 +313,31 @@ class CoordinatorReportMessage(MonitoringModel):
     correlation_id: str
     project_id: str
     report: MonitoringReport
+
+
+class PlanningProvider(Protocol):
+    async def get_plan(self, project_id: str) -> PlanningSnapshot: ...
+
+
+class ActualDataProvider(Protocol):
+    async def get_actual(self, project_id: str) -> ActualProjectSnapshot: ...
+
+
+class RiskKnowledgeProvider(Protocol):
+    async def get_risks(self, project_id: str) -> RiskSnapshot | None: ...
+
+
+class MonitoringReportRepository(Protocol):
+    async def save(self, report: MonitoringReport, principal: MonitoringPrincipal) -> None: ...
+    async def get(self, project_id: str, report_id: str,
+                  principal: MonitoringPrincipal) -> MonitoringReport | None: ...
+    async def list(self, project_id: str, principal: MonitoringPrincipal,
+                   limit: int = 20) -> list[MonitoringReport]: ...
+
+
+class MonitoringSummarizer(Protocol):
+    async def select_facts(self, facts: list[SummaryFact]) -> SummarySelection: ...
+
+
+class CoordinatorReportSink(Protocol):
+    async def publish(self, message: CoordinatorReportMessage) -> None: ...
