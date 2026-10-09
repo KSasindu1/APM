@@ -1,96 +1,129 @@
+
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
+from functools import lru_cache
 
-from dotenv import load_dotenv
-
-
-load_dotenv()
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 
 
-@dataclass(frozen=True)
-class Settings:
-    supabase_url: str
-    supabase_secret_key: str
+class Settings(BaseSettings):
 
-    groq_api_key: str | None
-    groq_model: str
+    # ---------------------------------------------------------
+    # Groq AI
+    # ---------------------------------------------------------
 
-    planning_api_key: str | None
+    groq_api_key: str | None = None
+    groq_model: str = "openai/gpt-oss-120b"
 
-    cors_origins: tuple[str, ...]
+    # ---------------------------------------------------------
+    # Supabase
+    # ---------------------------------------------------------
+
+    supabase_url: str = ""
+    supabase_secret_key: str = ""
+
+    # ---------------------------------------------------------
+    # Planning & Scheduling Agent
+    # ---------------------------------------------------------
+
+    planning_api_key: str | None = None
+
+    # ---------------------------------------------------------
+    # ChromaDB - Risk & Knowledge Agent
+    # ---------------------------------------------------------
+
+    chroma_persist_directory: str = "data/chroma"
+    chroma_collection_name: str = "project_knowledge"
+
+    # ---------------------------------------------------------
+    # PostgreSQL
+    # ---------------------------------------------------------
+
+    postgres_database_url: str | None = None
+    postgres_search_limit: int = 20
+
+    # ---------------------------------------------------------
+    # Document Uploads
+    # ---------------------------------------------------------
+
+    upload_directory: str = "data/documents"
+    max_upload_size_mb: int = 10
+
+    # ---------------------------------------------------------
+    # Admin Authentication
+    # ---------------------------------------------------------
+
+    admin_username: str = ""
+    admin_password: str = ""
+
+    jwt_secret_key: str = ""
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 60
+
+    # ---------------------------------------------------------
+    # CORS Configuration
+    # ---------------------------------------------------------
+
+    cors_origins: tuple[str, ...] = (
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value):
+        if isinstance(value, str):
+            return tuple(
+                origin.strip()
+                for origin in value.split(",")
+                if origin.strip()
+            )
+        return value
+
+    # ---------------------------------------------------------
+    # Environment Settings
+    # ---------------------------------------------------------
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        enable_decoding=False,
+    )
 
 
+# ---------------------------------------------------------
+# Shared Settings
+# ---------------------------------------------------------
+
+@lru_cache
 def get_settings() -> Settings:
+    return Settings()
 
-    supabase_url = os.getenv(
-        "SUPABASE_URL",
-        "",
-    ).strip()
 
-    supabase_secret_key = os.getenv(
-        "SUPABASE_SECRET_KEY",
-        "",
-    ).strip()
+# Supports existing Risk Agent imports:
+# from app.core.config import settings
 
-    groq_api_key = (
-        os.getenv(
-            "GROQ_API_KEY",
-            "",
-        ).strip()
-        or None
-    )
+settings = get_settings()
 
-    groq_model = os.getenv(
-        "GROQ_MODEL",
-        "openai/gpt-oss-120b",
-    ).strip()
 
-    planning_api_key = (
-        os.getenv(
-            "PLANNING_API_KEY",
-            "",
-        ).strip()
-        or None
-    )
-
-    cors_origins_raw = os.getenv(
-        "CORS_ORIGINS",
-        (
-            "http://localhost:5173,"
-            "http://127.0.0.1:5173,"
-            "http://localhost:3000,"
-            "http://127.0.0.1:3000"
-        ),
-    )
-
-    cors_origins = tuple(
-        origin.strip()
-        for origin in cors_origins_raw.split(",")
-        if origin.strip()
-    )
-
-    return Settings(
-        supabase_url=supabase_url,
-        supabase_secret_key=supabase_secret_key,
-        groq_api_key=groq_api_key,
-        groq_model=groq_model,
-        planning_api_key=planning_api_key,
-        cors_origins=cors_origins,
-    )
-
+# ---------------------------------------------------------
+# Configuration Validation
+# ---------------------------------------------------------
 
 def validate_configuration() -> Settings:
 
-    settings = get_settings()
+    config = get_settings()
 
     missing: list[str] = []
 
-    if not settings.supabase_url:
+    if not config.supabase_url:
         missing.append("SUPABASE_URL")
 
-    if not settings.supabase_secret_key:
+    if not config.supabase_secret_key:
         missing.append("SUPABASE_SECRET_KEY")
 
     if missing:
@@ -99,4 +132,4 @@ def validate_configuration() -> Settings:
             + ", ".join(missing)
         )
 
-    return settings
+    return config

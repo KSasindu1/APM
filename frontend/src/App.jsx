@@ -1,10 +1,15 @@
+import { useState } from "react";
 import {
   BrowserRouter,
   Routes,
   Route,
   Link,
+  Navigate,
+  useNavigate,
 } from "react-router-dom";
 
+import AdminLogin from "./admin/AdminLogin.jsx";
+import AdminDashboard from "./admin/AdminDashboard.jsx";
 import Dashboard from "./pages/Dashboard";
 import Planning from "./pages/Planning";
 import Schedule from "./pages/Schedule";
@@ -50,12 +55,10 @@ function LandingPage() {
           </a>
         </nav>
 
-        <Link
-          to="/dashboard"
-          className="nav-button"
-        >
-          Get Started
-        </Link>
+        <div className="nav-actions">
+          <Link to="/admin/login" className="nav-button">Admin Login</Link>
+          <Link to="/dashboard" className="nav-button">Get Started</Link>
+        </div>
       </header>
 
       <main>
@@ -116,14 +119,41 @@ function LandingPage() {
                 <span>AI Agents</span>
               </div>
 
-              <div className="stat-divider"></div>
+```
+      <div className="brand-text">
+        <h1>APM</h1>
+        <span>Agentic Project Management</span>
+      </div>
+    </div>
 
-              <div className="stat">
-                <strong>24/7</strong>
-                <span>Monitoring</span>
-              </div>
+    <nav className="nav-links">
+      <a href="#home">Home</a>
+      <a href="#features">Features</a>
+      <a href="#agents">AI Agents</a>
+      <a href="#about">About</a>
+    </nav>
 
-              <div className="stat-divider"></div>
+    <button
+      className="nav-button"
+      onClick={() => setCurrentPage("login")}
+    >
+      Admin Login
+    </button>
+  </header>
+
+  {/* ==================== HERO ==================== */}
+  <main>
+    <section className="hero" id="home">
+      <div className="hero-content">
+        <div className="badge">
+          <span className="badge-dot"></span>
+          AI-POWERED PROJECT MANAGEMENT
+        </div>
+
+        <h2>
+          Manage Projects
+          <span>Smarter with AI Agents.</span>
+        </h2>
 
               <div className="stat">
                 <strong>AI</strong>
@@ -429,6 +459,7 @@ function LandingPage() {
               </span>
 
             </div>
+          </div>
 
             <div className="feature-card">
 
@@ -540,6 +571,10 @@ function LandingPage() {
               </div>
 
             </div>
+          </div>
+        </div>
+      </div>
+    </section>
 
             <div className="agent-card">
 
@@ -642,7 +677,10 @@ function LandingPage() {
 
             </div>
 
-            <div className="workflow-line"></div>
+        <h2>
+          One request.
+          <span>Multiple intelligent agents.</span>
+        </h2>
 
             <div className="workflow-step">
 
@@ -661,7 +699,7 @@ function LandingPage() {
 
             </div>
 
-            <div className="workflow-line"></div>
+        <div className="workflow-line"></div>
 
             <div className="workflow-step">
 
@@ -680,7 +718,10 @@ function LandingPage() {
 
             </div>
 
-            <div className="workflow-line"></div>
+    {/* ==================== CTA ==================== */}
+    <section className="cta-section" id="about">
+      <div className="cta-content">
+        <div className="badge cta-badge">AGENTIC AI</div>
 
             <div className="workflow-step">
 
@@ -779,39 +820,47 @@ function LandingPage() {
 // Application Routes
 // ============================================================
 
+function AdminLoginPage({ onLoginSuccess }) {
+  const navigate = useNavigate();
+  return (
+    <AdminLogin
+      onLoginSuccess={(data) => {
+        onLoginSuccess(data);
+        navigate("/admin/dashboard");
+      }}
+      onBack={() => navigate("/")}
+    />
+  );
+}
+
+function AdminDashboardPage({ session, onLogout }) {
+  const navigate = useNavigate();
+  if (!session) return <Navigate to="/admin/login" replace />;
+  return (
+    <AdminDashboard
+      session={session}
+      onLogout={() => {
+        onLogout();
+        navigate("/");
+      }}
+      onBack={() => navigate("/")}
+    />
+  );
+}
+
 function App() {
+  const [session, setSession] = useState(null);
   return (
     <BrowserRouter>
-
       <Routes>
-
-        <Route
-          path="/"
-          element={<LandingPage />}
-        />
-
-        <Route
-          path="/dashboard"
-          element={<Dashboard />}
-        />
-
-        <Route
-          path="/planning"
-          element={<Planning />}
-        />
-
-        <Route
-          path="/schedule"
-          element={<Schedule />}
-        />
-
-        <Route
-          path="/schedule/:projectId"
-          element={<Schedule />}
-        />
-
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/admin/login" element={<AdminLoginPage onLoginSuccess={setSession} />} />
+        <Route path="/admin/dashboard" element={<AdminDashboardPage session={session} onLogout={() => setSession(null)} />} />
+        <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/planning" element={<Planning />} />
+        <Route path="/schedule" element={<Schedule />} />
+        <Route path="/schedule/:projectId" element={<Schedule />} />
       </Routes>
-
     </BrowserRouter>
   );
 }
