@@ -9,6 +9,7 @@ function AdminDashboard({ session, onLogout, onBack }) {
   const [loadingDocuments, setLoadingDocuments] = useState(false);
   const [loadingChunks, setLoadingChunks] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [deletingDocumentId, setDeletingDocumentId] = useState(null);
 
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -64,6 +65,7 @@ function AdminDashboard({ session, onLogout, onBack }) {
     setChunks([]);
     setSearchResults([]);
     setKnowledgeError("");
+    setMessage("");
   }
 
   async function loadDocuments(projectOverride) {
@@ -119,6 +121,64 @@ function AdminDashboard({ session, onLogout, onBack }) {
       setKnowledgeError(err.message);
     } finally {
       setLoadingChunks(false);
+    }
+  }
+
+  async function deleteDocument(document) {
+    const id = projectId.trim();
+
+    if (!id) {
+      setKnowledgeError("Enter a project ID first.");
+      return;
+    }
+
+    if (deletingDocumentId !== null || loadingDocuments || loadingChunks) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Are you sure you want to delete "${document.name}" from this project's indexed knowledge base?\n\n` +
+        "This permanently removes its indexed chunks from ChromaDB. " +
+        "The original PDF file is not deleted."
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setKnowledgeError("");
+    setMessage("");
+    setError("");
+    setDeletingDocumentId(document.document_id);
+
+    try {
+      const data = await apiRequest(
+        `/api/risk/knowledge/documents/${encodeURIComponent(
+          document.document_id
+        )}?project_id=${encodeURIComponent(id)}`,
+        {
+          method: "DELETE",
+        }
+      );
+
+      if (selectedDocument?.document_id === document.document_id) {
+        setSelectedDocument(null);
+        setChunks([]);
+      }
+
+      setSearchResults([]);
+
+      // Refresh the knowledge base after a successful deletion.
+      await loadDocuments(id);
+
+      setMessage(
+        `${data.message || "Document deleted successfully."} ` +
+          `${data.deleted_chunks ?? 0} indexed chunks removed.`
+      );
+    } catch (err) {
+      setKnowledgeError(err.message);
+    } finally {
+      setDeletingDocumentId(null);
     }
   }
 
@@ -196,21 +256,12 @@ function AdminDashboard({ session, onLogout, onBack }) {
 
       const uploadedName = selectedFile.name;
 
-      setMessage(
-        `${data.message || "Document uploaded successfully."} ${
-          data.result?.chunks_created != null
-            ? `${data.result.chunks_created} chunks indexed.`
-            : ""
-        }`
-      );
-
       setSelectedFile(null);
       event.target.reset();
 
       // Refresh the list so the newly indexed document appears.
       await loadDocuments(projectId.trim());
 
-      // Preserve the upload confirmation if refreshing succeeds.
       setMessage(
         `${data.message || "Document uploaded successfully."} ${
           data.result?.chunks_created != null
@@ -366,8 +417,17 @@ function AdminDashboard({ session, onLogout, onBack }) {
               style={{ ...inputStyle, padding: "10px" }}
             />
 
-            {message && <p role="status" style={successMessageStyle}>{message}</p>}
-            {error && <p role="alert" style={errorMessageStyle}>{error}</p>}
+            {message && (
+              <p role="status" style={successMessageStyle}>
+                {message}
+              </p>
+            )}
+
+            {error && (
+              <p role="alert" style={errorMessageStyle}>
+                {error}
+              </p>
+            )}
 
             <button
               type="submit"
@@ -389,14 +449,15 @@ function AdminDashboard({ session, onLogout, onBack }) {
           </h2>
 
           <p style={{ color: "#64748b", lineHeight: 1.6 }}>
-            Browse documents and chunks stored for a project. Use the same
-            project ID that you used when uploading its PDFs.
+            Browse, inspect, and delete indexed documents and chunks stored for
+            a project. Use the same project ID that you used when uploading
+            its PDFs.
           </p>
 
           <button
             type="button"
             onClick={() => loadDocuments()}
-            disabled={loadingDocuments}
+            disabled={loadingDocuments || deletingDocumentId !== null}
             style={{
               ...primaryButtonStyle,
               marginTop: "8px",
@@ -435,7 +496,12 @@ function AdminDashboard({ session, onLogout, onBack }) {
                   {documents.map((document) => (
                     <article key={document.document_id} style={documentStyle}>
                       <div style={{ minWidth: 0, flex: 1 }}>
-                        <h4 style={{ margin: "0 0 8px", overflowWrap: "anywhere" }}>
+                        <h4
+                          style={{
+                            margin: "0 0 8px",
+                            overflowWrap: "anywhere",
+                          }}
+                        >
                           {document.name}
                         </h4>
 
@@ -444,7 +510,9 @@ function AdminDashboard({ session, onLogout, onBack }) {
                         </p>
 
                         <details>
-                          <summary style={{ cursor: "pointer", color: "#64748b" }}>
+                          <summary
+                            style={{ cursor: "pointer", color: "#64748b" }}
+                          >
                             Document metadata
                           </summary>
 
@@ -463,14 +531,65 @@ function AdminDashboard({ session, onLogout, onBack }) {
                         </details>
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={() => viewChunks(document)}
-                        disabled={loadingChunks}
-                        style={secondaryButtonStyle}
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: "8px",
+                          flexWrap: "wrap",
+                          alignItems: "flex-start",
+                        }}
                       >
-                        View chunks
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => viewChunks(document)}
+                          disabled={
+                            loadingChunks ||
+                            deletingDocumentId !== null ||
+                            loadingDocuments
+                          }
+                          style={{
+                            ...secondaryButtonStyle,
+                            opacity:
+                              loadingChunks ||
+                              deletingDocumentId !== null ||
+                              loadingDocuments
+                                ? 0.7
+                                : 1,
+                          }}
+                        >
+                          View chunks
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => deleteDocument(document)}
+                          disabled={
+                            deletingDocumentId !== null ||
+                            loadingDocuments ||
+                            loadingChunks
+                          }
+                          style={{
+                            ...secondaryButtonStyle,
+                            color: "#b91c1c",
+                            border: "1px solid #fecaca",
+                            background: "#fff",
+                            opacity:
+                              deletingDocumentId === document.document_id
+                                ? 0.7
+                                : 1,
+                            cursor:
+                              deletingDocumentId !== null ||
+                              loadingDocuments ||
+                              loadingChunks
+                                ? "not-allowed"
+                                : "pointer",
+                          }}
+                        >
+                          {deletingDocumentId === document.document_id
+                            ? "Deleting..."
+                            : "Delete"}
+                        </button>
+                      </div>
                     </article>
                   ))}
                 </div>
@@ -511,7 +630,9 @@ function AdminDashboard({ session, onLogout, onBack }) {
                         </p>
 
                         <details>
-                          <summary style={{ cursor: "pointer", color: "#64748b" }}>
+                          <summary
+                            style={{ cursor: "pointer", color: "#64748b" }}
+                          >
                             View chunk metadata
                           </summary>
 
@@ -610,7 +731,9 @@ function AdminDashboard({ session, onLogout, onBack }) {
                     </p>
 
                     <details>
-                      <summary style={{ cursor: "pointer", color: "#64748b" }}>
+                      <summary
+                        style={{ cursor: "pointer", color: "#64748b" }}
+                      >
                         Result metadata
                       </summary>
 
@@ -729,6 +852,7 @@ const successMessageStyle = {
   background: "#ecfdf5",
   color: "#047857",
   lineHeight: 1.6,
+  overflowWrap: "anywhere",
 };
 
 const errorMessageStyle = {
