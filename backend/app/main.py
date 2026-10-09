@@ -1,3 +1,4 @@
+
 from contextlib import asynccontextmanager
 import threading
 import time
@@ -6,6 +7,7 @@ import webbrowser
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.auth import router as auth_router
 from app.api.risks import router as risk_router
 
 
@@ -54,6 +56,15 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------
+
+app.include_router(
+    auth_router
 )
 
 

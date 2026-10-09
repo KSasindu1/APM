@@ -1,8 +1,10 @@
+
 from pathlib import Path
 import uuid
 
 from fastapi import (
     APIRouter,
+    Depends,
     File,
     HTTPException,
     UploadFile,
@@ -24,6 +26,7 @@ from app.communication.protocol import (
     RiskAgentProtocol,
 )
 from app.core.config import settings
+from app.core.security import require_admin
 
 
 router = APIRouter(
@@ -50,10 +53,12 @@ protocol = RiskAgentProtocol(
 async def upload_document(
     project_id: str,
     file: UploadFile = File(...),
+    admin: dict = Depends(require_admin),
 ):
     """
     Upload a project document for knowledge ingestion.
 
+    Only authenticated administrators can upload documents.
     Current implementation supports PDF documents.
     """
 
@@ -355,3 +360,137 @@ async def receive_plan_from_planning_agent(
                 "Planning Agent message."
             ),
         )
+
+
+@router.get("/knowledge/documents")
+def list_indexed_documents(
+    project_id: str,
+    admin: dict = Depends(require_admin),
+):
+    """
+    List documents indexed in the existing ChromaDB collection
+    for one project, including their stored chunk counts.
+    """
+    if not project_id.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="project_id is required.",
+        )
+
+    collection = agent.retrieval_service.collection
+
+    stored = collection.get(
+        where={"project_id": project_id.strip()},
+        include=["metadatas"],
+    )
+
+    ids = stored.get("ids", [])
+    metadatas = stored.get("metadatas") or []
+
+    documents = {}
+
+    for index, chunk_id in enumerate(ids):
+        metadata = (
+            metadatas[index] or {}
+            if index < len(metadatas)
+            else {}
+        )
+
+        document_id = metadata.get("document_id")
+        if not document_id:
+            continue
+
+        if document_id not in documents:
+            documents[document_id] = {
+                "document_id": document_id,
+                "project_id": project_id.strip(),
+                "name": metadata.get(
+                    "document_name",
+                    metadata.get("source", "Unknown document"),
+                ),
+                "source": metadata.get("source", "Unknown document"),
+                "document_hash": metadata.get("document_hash"),
+                "chunks_count": 0,
+            }
+
+        documents[document_id]["chunks_count"] += 1
+
+    return {
+        "project_id": project_id.strip(),
+        "total_documents": len(documents),
+        "total_chunks": len(ids),
+        "documents": sorted(
+            documents.values(),
+            key=lambda item: item["name"].lower(),
+        ),
+    }
+
+
+@router.get("/knowledge/documents/{document_id}/chunks")
+def list_document_chunks(
+    document_id: str,
+    project_id: str,
+    admin: dict = Depends(require_admin),
+):
+    """
+    Return the stored text and metadata for a single document.
+    The project filter prevents cross-project access.
+    """
+    if not project_id.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="project_id is required.",
+        )
+
+    if not document_id.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="document_id is required.",
+        )
+
+    collection = agent.retrieval_service.collection
+
+    stored = collection.get(
+        where={
+            "$and": [
+                {"project_id": project_id.strip()},
+                {"document_id": document_id.strip()},
+            ]
+        },
+        include=["documents", "metadatas"],
+    )
+
+    ids = stored.get("ids", [])
+    texts = stored.get("documents") or []
+    metadatas = stored.get("metadatas") or []
+
+    if not ids:
+        raise HTTPException(
+            status_code=404,
+            detail="No indexed chunks were found for this document and project.",
+        )
+
+    chunks = []
+
+    for index, chunk_id in enumerate(ids):
+        metadata = (
+            metadatas[index] or {}
+            if index < len(metadatas)
+            else {}
+        )
+
+        chunks.append({
+            "chunk_id": chunk_id,
+            "chunk_index": metadata.get("chunk_index", index),
+            "text": texts[index] if index < len(texts) else "",
+            "metadata": metadata,
+        })
+
+    chunks.sort(key=lambda item: item["chunk_index"])
+
+    return {
+        "project_id": project_id.strip(),
+        "document_id": document_id.strip(),
+        "total_chunks": len(chunks),
+        "chunks": chunks,
+    }

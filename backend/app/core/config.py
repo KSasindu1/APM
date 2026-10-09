@@ -1,3 +1,4 @@
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,6 +44,28 @@ class Settings(BaseSettings):
     upload_directory: str = "data/documents"
 
     max_upload_size_mb: int = 10
+
+    # ---------------------------------------------------------
+    # Admin Authentication
+    # ---------------------------------------------------------
+
+    # Username used by the administrator to log in.
+    admin_username: str
+
+    # Password used by the administrator to log in.
+    admin_password: str = '#&thvtksep26'
+
+    # Secret used to sign and verify JWT access tokens.
+    #
+    # This MUST be stored in the .env file and must never
+    # be hard-coded or committed to Git.
+    jwt_secret_key: str = "zFRDmue7IxtnchRvIRPQt20GbhkzetBF5A5IFlybndLDNmNbVCnvrQsW_NrlErFAPU66HBaF3GPcBPmnWsQxEw"
+
+    # JWT signing algorithm.
+    jwt_algorithm: str = "HS256"
+
+    # Lifetime of an issued access token in minutes.
+    access_token_expire_minutes: int = 60
 
     model_config = SettingsConfigDict(
         env_file=".env",
