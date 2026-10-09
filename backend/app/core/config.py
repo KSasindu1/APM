@@ -3,18 +3,11 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-
-    # ---------------------------------------------------------
-    # Groq AI
-    # ---------------------------------------------------------
-
-    groq_api_key: str | None = None
-    groq_model: str = "openai/gpt-oss-120b"
 
     # ---------------------------------------------------------
     # Supabase
@@ -24,13 +17,20 @@ class Settings(BaseSettings):
     supabase_secret_key: str = ""
 
     # ---------------------------------------------------------
+    # Groq AI
+    # ---------------------------------------------------------
+
+    groq_api_key: str | None = None
+    groq_model: str = "openai/gpt-oss-120b"
+
+    # ---------------------------------------------------------
     # Planning & Scheduling Agent
     # ---------------------------------------------------------
 
     planning_api_key: str | None = None
 
     # ---------------------------------------------------------
-    # ChromaDB - Risk & Knowledge Agent
+    # Risk & Knowledge Retrieval Agent - ChromaDB
     # ---------------------------------------------------------
 
     chroma_persist_directory: str = "data/chroma"
@@ -81,10 +81,11 @@ class Settings(BaseSettings):
                 for origin in value.split(",")
                 if origin.strip()
             )
+
         return value
 
     # ---------------------------------------------------------
-    # Environment Settings
+    # Environment Configuration
     # ---------------------------------------------------------
 
     model_config = SettingsConfigDict(
@@ -92,21 +93,20 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         enable_decoding=False,
+        str_strip_whitespace=True,
     )
 
 
 # ---------------------------------------------------------
-# Shared Settings
+# Settings Instance
 # ---------------------------------------------------------
 
-@lru_cache
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
 
 
-# Supports existing Risk Agent imports:
-# from app.core.config import settings
-
+# Compatibility with existing Risk Agent imports
 settings = get_settings()
 
 
@@ -116,14 +116,14 @@ settings = get_settings()
 
 def validate_configuration() -> Settings:
 
-    config = get_settings()
+    current_settings = get_settings()
 
     missing: list[str] = []
 
-    if not config.supabase_url:
+    if not current_settings.supabase_url:
         missing.append("SUPABASE_URL")
 
-    if not config.supabase_secret_key:
+    if not current_settings.supabase_secret_key:
         missing.append("SUPABASE_SECRET_KEY")
 
     if missing:
@@ -132,4 +132,4 @@ def validate_configuration() -> Settings:
             + ", ".join(missing)
         )
 
-    return config
+    return current_settings
