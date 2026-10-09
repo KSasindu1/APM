@@ -1,77 +1,135 @@
 
+from __future__ import annotations
+
+from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 
 
 class Settings(BaseSettings):
+
     # ---------------------------------------------------------
-    # Groq
+    # Groq AI
     # ---------------------------------------------------------
 
-    groq_api_key: str
+    groq_api_key: str | None = None
     groq_model: str = "openai/gpt-oss-120b"
 
     # ---------------------------------------------------------
-    # ChromaDB
+    # Supabase
+    # ---------------------------------------------------------
+
+    supabase_url: str = ""
+    supabase_secret_key: str = ""
+
+    # ---------------------------------------------------------
+    # Planning & Scheduling Agent
+    # ---------------------------------------------------------
+
+    planning_api_key: str | None = None
+
+    # ---------------------------------------------------------
+    # ChromaDB - Risk & Knowledge Agent
     # ---------------------------------------------------------
 
     chroma_persist_directory: str = "data/chroma"
-
     chroma_collection_name: str = "project_knowledge"
 
     # ---------------------------------------------------------
     # PostgreSQL
     # ---------------------------------------------------------
 
-    # PostgreSQL is currently used for integration with the
-    # Planning & Scheduling Agent.
-    #
-    # It is optional during independent development of the
-    # Risk & Knowledge Agent because document-based retrieval
-    # does not require PostgreSQL.
-    #
-    # Example:
-    # postgresql+psycopg://username:password@localhost:5432/projectflow
-
     postgres_database_url: str | None = None
-
-    # Maximum number of PostgreSQL records returned during search.
     postgres_search_limit: int = 20
 
     # ---------------------------------------------------------
-    # Application
+    # Document Uploads
     # ---------------------------------------------------------
 
     upload_directory: str = "data/documents"
-
     max_upload_size_mb: int = 10
 
     # ---------------------------------------------------------
     # Admin Authentication
     # ---------------------------------------------------------
 
-    # Username used by the administrator to log in.
-    admin_username: str
+    admin_username: str = ""
+    admin_password: str = ""
 
-    # Password used by the administrator to log in.
-    admin_password: str = '#&thvtksep26'
-
-    # Secret used to sign and verify JWT access tokens.
-    #
-    # This MUST be stored in the .env file and must never
-    # be hard-coded or committed to Git.
-    jwt_secret_key: str = "zFRDmue7IxtnchRvIRPQt20GbhkzetBF5A5IFlybndLDNmNbVCnvrQsW_NrlErFAPU66HBaF3GPcBPmnWsQxEw"
-
-    # JWT signing algorithm.
+    jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"
-
-    # Lifetime of an issued access token in minutes.
     access_token_expire_minutes: int = 60
+
+    # ---------------------------------------------------------
+    # CORS Configuration
+    # ---------------------------------------------------------
+
+    cors_origins: tuple[str, ...] = (
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    )
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value):
+        if isinstance(value, str):
+            return tuple(
+                origin.strip()
+                for origin in value.split(",")
+                if origin.strip()
+            )
+        return value
+
+    # ---------------------------------------------------------
+    # Environment Settings
+    # ---------------------------------------------------------
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        enable_decoding=False,
     )
 
 
-settings = Settings()
+# ---------------------------------------------------------
+# Shared Settings
+# ---------------------------------------------------------
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+# Supports existing Risk Agent imports:
+# from app.core.config import settings
+
+settings = get_settings()
+
+
+# ---------------------------------------------------------
+# Configuration Validation
+# ---------------------------------------------------------
+
+def validate_configuration() -> Settings:
+
+    config = get_settings()
+
+    missing: list[str] = []
+
+    if not config.supabase_url:
+        missing.append("SUPABASE_URL")
+
+    if not config.supabase_secret_key:
+        missing.append("SUPABASE_SECRET_KEY")
+
+    if missing:
+        raise RuntimeError(
+            "Missing required environment variables: "
+            + ", ".join(missing)
+        )
+
+    return config
