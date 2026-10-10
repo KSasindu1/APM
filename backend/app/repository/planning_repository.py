@@ -9,12 +9,17 @@ from app.core.config import get_settings
 from app.model.planning import ScheduleResponse
 
 
+class ProjectScheduleExists(Exception):
+    pass
+
+
 class PlanningRepository:
     """
     Supabase-backed schedule repository.
 
     The complete ScheduleResponse is stored inside
-    the JSONB `schedule` column.
+    the JSONB `schedule` column. A None owner scope is reserved
+    for trusted admin/service callers.
     """
 
     TABLE_NAME = "project_schedules"
@@ -64,20 +69,76 @@ class PlanningRepository:
                 None,
             )
 
-            if code == "PGRST205":
+            if code in ("PGRST205", "42P01"):
 
                 raise RuntimeError(
                     "Supabase table "
                     "'public.project_schedules' was not found. "
-                    "Run supabase.sql in the Supabase SQL Editor."
+                    "Apply backend/sql/schema.sql and "
+                    "backend/sql/auth_accounts.sql before "
+                    "backend/sql/project_ownership.sql."
+                ) from exc
+
+            if code in ("PGRST204", "42703"):
+
+                raise RuntimeError(
+                    "Supabase project_schedules schema is incomplete. "
+                    "Apply backend/sql/project_ownership.sql after "
+                    "backend/sql/auth_accounts.sql and the existing "
+                    "project_schedules schema."
                 ) from exc
 
         raise exc
+
+    def create(
+        self,
+        schedule: ScheduleResponse,
+        *,
+        owner_user_id: str | None,
+    ) -> ScheduleResponse:
+
+        payload = {
+            "project_id": schedule.project_id,
+            "project_name": schedule.project_name,
+            "schedule": schedule.model_dump(
+                mode="json"
+            ),
+            "owner_user_id": owner_user_id,
+        }
+
+        try:
+
+            response = (
+                self.client
+                .table(self.TABLE_NAME)
+                .insert(payload)
+                .execute()
+            )
+
+        except Exception as exc:
+
+            if getattr(exc, "code", None) == "23505":
+
+                raise ProjectScheduleExists(
+                    "A schedule with this project ID already exists."
+                ) from exc
+
+            self._handle_supabase_error(exc)
+            raise
+
+        if not response.data:
+
+            raise RuntimeError(
+                "Supabase did not return the created schedule."
+            )
+
+        return schedule
 
     def save(
         self,
         schedule: ScheduleResponse,
     ) -> ScheduleResponse:
+        """Trusted service upsert; never change an existing owner."""
 
         payload = {
             "project_id": schedule.project_id,
@@ -115,11 +176,13 @@ class PlanningRepository:
     def get(
         self,
         project_id: str,
+        *,
+        owner_user_id: str | None = None,
     ) -> ScheduleResponse | None:
 
         try:
 
-            response = (
+            query = (
                 self.client
                 .table(self.TABLE_NAME)
                 .select("schedule")
@@ -127,9 +190,16 @@ class PlanningRepository:
                     "project_id",
                     project_id,
                 )
-                .limit(1)
-                .execute()
             )
+
+            if owner_user_id is not None:
+
+                query = query.eq(
+                    "owner_user_id",
+                    owner_user_id,
+                )
+
+            response = query.limit(1).execute()
 
         except Exception as exc:
 
@@ -152,14 +222,27 @@ class PlanningRepository:
 
     def get_all(
         self,
+        *,
+        owner_user_id: str | None = None,
     ) -> list[ScheduleResponse]:
 
         try:
 
-            response = (
+            query = (
                 self.client
                 .table(self.TABLE_NAME)
                 .select("schedule")
+            )
+
+            if owner_user_id is not None:
+
+                query = query.eq(
+                    "owner_user_id",
+                    owner_user_id,
+                )
+
+            response = (
+                query
                 .order(
                     "created_at",
                     desc=True,
@@ -196,6 +279,8 @@ class PlanningRepository:
         self,
         project_id: str,
         schedule: ScheduleResponse,
+        *,
+        owner_user_id: str | None = None,
     ) -> ScheduleResponse | None:
 
         if schedule.project_id != project_id:
@@ -205,35 +290,94 @@ class PlanningRepository:
                 "the requested project ID."
             )
 
-        existing = self.get(
-            project_id
-        )
+        payload = {
+            "project_name": schedule.project_name,
+            "schedule": schedule.model_dump(
+                mode="json"
+            ),
+        }
 
-        if existing is None:
+        try:
+
+            query = (
+                self.client
+                .table(self.TABLE_NAME)
+                .update(payload)
+                .eq(
+                    "project_id",
+                    project_id,
+                )
+            )
+
+            if owner_user_id is not None:
+
+                query = query.eq(
+                    "owner_user_id",
+                    owner_user_id,
+                )
+
+            response = query.execute()
+
+        except Exception as exc:
+
+            self._handle_supabase_error(exc)
+            raise
+
+        if not response.data:
             return None
-
-        self.save(schedule)
 
         return schedule
 
     def delete(
         self,
         project_id: str,
+        *,
+        owner_user_id: str | None = None,
     ) -> bool:
 
-        existing = self.get(
-            project_id
-        )
+        try:
 
-        if existing is None:
-            return False
+            query = (
+                self.client
+                .table(self.TABLE_NAME)
+                .delete()
+                .eq(
+                    "project_id",
+                    project_id,
+                )
+            )
+
+            if owner_user_id is not None:
+
+                query = query.eq(
+                    "owner_user_id",
+                    owner_user_id,
+                )
+
+            response = query.execute()
+
+        except Exception as exc:
+
+            self._handle_supabase_error(exc)
+            raise
+
+        return bool(response.data)
+
+    def assign_owner(
+        self,
+        project_id: str,
+        owner_user_id: str,
+    ) -> bool:
+        """Assign ownership only on behalf of a verified admin caller."""
 
         try:
 
             response = (
                 self.client
                 .table(self.TABLE_NAME)
-                .delete()
+                .update({
+                    "owner_user_id": owner_user_id,
+                })
                 .eq(
                     "project_id",
                     project_id,
@@ -251,8 +395,11 @@ class PlanningRepository:
     def exists(
         self,
         project_id: str,
+        *,
+        owner_user_id: str | None = None,
     ) -> bool:
 
         return self.get(
-            project_id
+            project_id,
+            owner_user_id=owner_user_id,
         ) is not None

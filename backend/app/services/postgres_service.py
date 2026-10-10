@@ -39,8 +39,8 @@ class PostgreSQLService:
     this service discovers tables and text-compatible columns rather
     than hard-coding a table name.
 
-    project_id is used as the primary project-level filter whenever
-    a matching project identifier column exists.
+    Only tables with a recognized project identifier column are searched;
+    project_id is required as the project-level filter.
     """
 
     def __init__(self):
@@ -157,8 +157,8 @@ class PostgreSQLService:
         Search PostgreSQL project-plan information.
 
         The search checks textual columns for the supplied query
-        and limits the search to the requested project whenever
-        a project identifier column exists.
+        and requires a recognized project identifier column to limit
+        every query to the requested project.
         """
 
         if not project_id:
@@ -202,6 +202,10 @@ class PostgreSQLService:
                     self._find_project_column(table)
                 )
 
+                # Unbound records cannot safely be attributed to this project.
+                if project_column is None:
+                    continue
+
                 record_id_column = (
                     self._find_record_id_column(table)
                 )
@@ -223,13 +227,12 @@ class PostgreSQLService:
                     or_(*search_conditions)
                 ]
 
-                if project_column is not None:
-                    conditions.append(
-                        cast(
-                            project_column,
-                            String,
-                        ) == str(project_id)
-                    )
+                conditions.append(
+                    cast(
+                        project_column,
+                        String,
+                    ) == str(project_id)
+                )
 
                 statement = (
                     select(table)

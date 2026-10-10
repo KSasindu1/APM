@@ -1,7 +1,10 @@
+import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import { AdminApiError, adminApi, adminErrorMessage, isAdminSessionValid, validateAdminKnowledgeResponse } from "../services/adminApi.js";
 
-import { useState } from "react";
+import "./Admin.css";
 
-function AdminDashboard({ session, onLogout, onBack }) {
+function AdminDashboard({ session, onLogout }) {
   const [projectId, setProjectId] = useState("");
   const [selectedFile, setSelectedFile] = useState(null);
 
@@ -23,39 +26,34 @@ function AdminDashboard({ session, onLogout, onBack }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
 
-  // Keep VITE_API_BASE_URL if it is configured in your frontend .env.
-  const API_BASE_URL =
-    import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+  const scope = useRef({ mounted: false, generation: 0, requests: new Map() });
+  const fileInput = useRef(null);
 
-  async function apiRequest(path, options = {}) {
-    const response = await fetch(`${API_BASE_URL}${path}`, {
-      ...options,
-      headers: {
-        Authorization: `Bearer ${session.access_token}`,
-        ...(options.body instanceof FormData
-          ? {}
-          : options.body
-            ? { "Content-Type": "application/json" }
-            : {}),
-        ...options.headers,
-      },
-    });
+  useEffect(() => {
+    const current = scope.current;
+    current.mounted = true;
+    return () => {
+      current.mounted = false;
+      current.generation += 1;
+      current.requests.forEach(operation => operation.controller.abort());
+      current.requests.clear();
+    };
+  }, []);
 
-    const data = await response.json().catch(() => ({}));
+  function cancelRequest(kind) {
+    scope.current.requests.get(kind)?.controller.abort();
+    scope.current.requests.delete(kind);
+  }
 
-    if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        throw new Error(
-          "Your administrator session may have expired or lacks permission. Please sign in again."
-        );
-      }
-
-      throw new Error(
-        data.detail || `Request failed with status ${response.status}.`
-      );
-    }
-
-    return data;
+  function invalidateRequests() {
+    scope.current.generation += 1;
+    scope.current.requests.forEach(operation => operation.controller.abort());
+    scope.current.requests.clear();
+    setUploading(false);
+    setLoadingDocuments(false);
+    setLoadingChunks(false);
+    setSearching(false);
+    setDeletingDocumentId(null);
   }
 
   function clearKnowledgeResults() {
@@ -68,59 +66,109 @@ function AdminDashboard({ session, onLogout, onBack }) {
     setMessage("");
   }
 
-  async function loadDocuments(projectOverride) {
-    const id = (projectOverride ?? projectId).trim();
+  function clearSensitiveState() {
+    invalidateRequests();
+    clearKnowledgeResults();
+    setProjectId("");
+    setSelectedFile(null);
+    if (fileInput.current) fileInput.current.value = "";
+    setSearchQuery("");
+    setMessage("");
+    setError("");
+  }
 
+  function handleLogout() {
+    clearSensitiveState();
+    onLogout();
+  }
+
+  function beginRequest(kind, id) {
+    if (!isAdminSessionValid(session)) {
+      handleLogout();
+      return null;
+    }
+    cancelRequest(kind);
+    const operation = { kind, id, generation: scope.current.generation, controller: new AbortController() };
+    scope.current.requests.set(kind, operation);
+    return operation;
+  }
+
+  function isCurrent(operation) {
+    return scope.current.mounted && scope.current.generation === operation.generation && scope.current.requests.get(operation.kind) === operation && !operation.controller.signal.aborted;
+  }
+
+  async function apiRequest(operation, path, options = {}) {
+    try {
+      return await adminApi.request(path, session, { ...options, signal: operation.controller.signal });
+    } catch (err) {
+      if (isCurrent(operation) && err.status === 401) handleLogout();
+      throw err;
+    }
+  }
+
+  function showRequestError(operation, err, setter) {
+    if (isCurrent(operation) && err?.name !== "AbortError") setter(adminErrorMessage(err));
+  }
+
+  function finishRequest(operation, setter) {
+    if (isCurrent(operation)) {
+      scope.current.requests.delete(operation.kind);
+      setter(false);
+    }
+  }
+
+  async function loadDocuments(projectOverride) {
+    if (projectOverride === undefined && (uploading || deletingDocumentId !== null)) return;
+    const id = (projectOverride ?? projectId).trim();
     setKnowledgeError("");
     setMessage("");
     setError("");
-
     if (!id) {
       setKnowledgeError("Enter a project ID first.");
       return;
     }
-
+    const operation = beginRequest("documents", id);
+    if (!operation) return;
+    cancelRequest("chunks");
+    cancelRequest("search");
+    setLoadingChunks(false);
+    setSearching(false);
     setLoadingDocuments(true);
-    setKnowledge(null);
-    setDocuments([]);
-    setSelectedDocument(null);
-    setChunks([]);
-    setSearchResults([]);
+    clearKnowledgeResults();
 
     try {
-      const data = await apiRequest(
+      const data = validateAdminKnowledgeResponse(await apiRequest(operation,
         `/api/risk/knowledge/documents?project_id=${encodeURIComponent(id)}`
-      );
-
+      ), id, "documents");
+      if (!isCurrent(operation)) return;
       setKnowledge(data);
-      setDocuments(data.documents || []);
+      setDocuments(data.documents);
     } catch (err) {
-      setKnowledgeError(
-        `${err.message} Make sure the knowledge-management endpoints have been added to the backend.`
-      );
+      showRequestError(operation, err, setKnowledgeError);
     } finally {
-      setLoadingDocuments(false);
+      finishRequest(operation, setLoadingDocuments);
     }
   }
 
   async function viewChunks(document) {
+    if (loadingDocuments || uploading || deletingDocumentId !== null) return;
+    const id = projectId.trim();
+    const operation = beginRequest("chunks", id);
+    if (!operation) return;
     setKnowledgeError("");
     setSelectedDocument(document);
     setChunks([]);
     setLoadingChunks(true);
 
     try {
-      const data = await apiRequest(
-        `/api/risk/knowledge/documents/${encodeURIComponent(
-          document.document_id
-        )}/chunks?project_id=${encodeURIComponent(projectId.trim())}`
-      );
-
-      setChunks(data.chunks || []);
+      const data = validateAdminKnowledgeResponse(await apiRequest(operation,
+        `/api/risk/knowledge/documents/${encodeURIComponent(document.document_id)}/chunks?project_id=${encodeURIComponent(id)}`
+      ), id, "chunks", document.document_id);
+      if (isCurrent(operation)) setChunks(data.chunks);
     } catch (err) {
-      setKnowledgeError(err.message);
+      showRequestError(operation, err, setKnowledgeError);
     } finally {
-      setLoadingChunks(false);
+      finishRequest(operation, setLoadingChunks);
     }
   }
 
@@ -132,7 +180,7 @@ function AdminDashboard({ session, onLogout, onBack }) {
       return;
     }
 
-    if (deletingDocumentId !== null || loadingDocuments || loadingChunks) {
+    if (deletingDocumentId !== null || loadingDocuments || loadingChunks || uploading || scope.current.requests.has("delete")) {
       return;
     }
 
@@ -146,245 +194,192 @@ function AdminDashboard({ session, onLogout, onBack }) {
       return;
     }
 
+    const operation = beginRequest("delete", id);
+    if (!operation) return;
+    cancelRequest("search");
+    setSearching(false);
+    setSearchResults([]);
     setKnowledgeError("");
     setMessage("");
     setError("");
     setDeletingDocumentId(document.document_id);
 
     try {
-      const data = await apiRequest(
-        `/api/risk/knowledge/documents/${encodeURIComponent(
-          document.document_id
-        )}?project_id=${encodeURIComponent(id)}`,
-        {
-          method: "DELETE",
-        }
+      const data = await apiRequest(operation,
+        `/api/risk/knowledge/documents/${encodeURIComponent(document.document_id)}?project_id=${encodeURIComponent(id)}`,
+        { method: "DELETE" }
       );
+      if (!isCurrent(operation)) return;
+      if (data.project_id !== id || data.document_id !== document.document_id || !Number.isSafeInteger(data.deleted_chunks) || data.deleted_chunks <= 0) {
+        throw new AdminApiError("response");
+      }
 
       if (selectedDocument?.document_id === document.document_id) {
         setSelectedDocument(null);
         setChunks([]);
       }
 
-      setSearchResults([]);
-
-      // Refresh the knowledge base after a successful deletion.
+      // Keep deletion, refresh, and confirmation bound to the original project.
       await loadDocuments(id);
-
-      setMessage(
-        `${data.message || "Document deleted successfully."} ` +
-          `${data.deleted_chunks ?? 0} indexed chunks removed.`
-      );
+      if (isCurrent(operation)) {
+        setMessage(`Document deleted successfully. ${data.deleted_chunks} indexed chunks removed.`);
+      }
     } catch (err) {
-      setKnowledgeError(err.message);
+      showRequestError(operation, err, setKnowledgeError);
     } finally {
-      setDeletingDocumentId(null);
+      finishRequest(operation, () => setDeletingDocumentId(null));
     }
   }
 
   async function handleSearch(event) {
     event.preventDefault();
-
+    if (deletingDocumentId !== null) return;
     setKnowledgeError("");
     setSearchResults([]);
-
-    if (!projectId.trim()) {
+    const id = projectId.trim();
+    if (!id) {
       setKnowledgeError("Enter a project ID before searching.");
       return;
     }
-
     if (!searchQuery.trim()) {
       setKnowledgeError("Enter a search question or phrase.");
       return;
     }
-
+    const operation = beginRequest("search", id);
+    if (!operation) return;
     setSearching(true);
 
     try {
-      const data = await apiRequest("/api/risk/knowledge/search", {
+      const data = validateAdminKnowledgeResponse(await apiRequest(operation, "/api/risk/knowledge/search", {
         method: "POST",
-        body: JSON.stringify({
-          project_id: projectId.trim(),
-          query: searchQuery.trim(),
-          top_k: 5,
-        }),
-      });
-
-      setSearchResults(data.results || []);
+        body: { project_id: id, query: searchQuery.trim(), top_k: 5 },
+      }), id, "results");
+      if (isCurrent(operation)) setSearchResults(data.results);
     } catch (err) {
-      setKnowledgeError(err.message);
+      showRequestError(operation, err, setKnowledgeError);
     } finally {
-      setSearching(false);
+      finishRequest(operation, setSearching);
     }
   }
 
   async function handleUpload(event) {
     event.preventDefault();
+    if (uploading || deletingDocumentId !== null) return;
     setMessage("");
     setError("");
-
-    if (!projectId.trim()) {
+    const id = projectId.trim();
+    if (!id) {
       setError("Please enter a project ID.");
       return;
     }
-
     if (!selectedFile) {
       setError("Please select a PDF document.");
       return;
     }
-
     if (!selectedFile.name.toLowerCase().endsWith(".pdf")) {
       setError("Only PDF files are supported.");
       return;
     }
-
+    const operation = beginRequest("upload", id);
+    if (!operation) return;
     const formData = new FormData();
     formData.append("file", selectedFile);
-
     setUploading(true);
 
     try {
-      const data = await apiRequest(
-        `/api/risk/documents?project_id=${encodeURIComponent(
-          projectId.trim()
-        )}`,
-        {
-          method: "POST",
-          body: formData,
-        }
-      );
-
-      const uploadedName = selectedFile.name;
-
+      const data = await apiRequest(operation, `/api/risk/documents?project_id=${encodeURIComponent(id)}`, { method: "POST", body: formData });
+      if (!isCurrent(operation)) return;
+      const count = data.result?.chunks_created;
+      const confirmation = `Document uploaded successfully.${Number.isSafeInteger(count) && count >= 0 ? ` ${count} chunks indexed.` : ""}`;
       setSelectedFile(null);
-      event.target.reset();
-
-      // Refresh the list so the newly indexed document appears.
-      await loadDocuments(projectId.trim());
-
-      setMessage(
-        `${data.message || "Document uploaded successfully."} ${
-          data.result?.chunks_created != null
-            ? `${data.result.chunks_created} chunks indexed.`
-            : ""
-        }`
-      );
-
-      if (!uploadedName) {
-        setMessage(data.message || "Document uploaded successfully.");
-      }
+      if (fileInput.current) fileInput.current.value = "";
+      // Keep the refresh and confirmation bound to the original project/upload.
+      await loadDocuments(id);
+      if (isCurrent(operation)) setMessage(confirmation);
     } catch (err) {
-      setError(
-        `${err.message} Check that the backend is running at ${API_BASE_URL}.`
-      );
+      showRequestError(operation, err, setError);
     } finally {
-      setUploading(false);
+      finishRequest(operation, setUploading);
     }
   }
 
   return (
-    <main
-      style={{
-        minHeight: "100vh",
-        padding: "32px 20px",
-        background: "#f8fafc",
-        color: "#172033",
-        fontFamily: '"Segoe UI", Arial, sans-serif',
-      }}
-    >
-      <div style={{ maxWidth: "1100px", margin: "0 auto" }}>
-        <header
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: "16px",
-            flexWrap: "wrap",
-            marginBottom: "32px",
-          }}
-        >
-          <div>
-            <p
-              style={{
-                margin: "0 0 6px",
-                color: "#5b4de8",
-                fontSize: "12px",
-                fontWeight: 800,
-                letterSpacing: "1.2px",
-              }}
-            >
+    <main className="admin-dashboard">
+      <div className="admin-dashboard__container">
+        <header className="admin-dashboard__header">
+          <div className="admin-dashboard__identity">
+            <p className="admin-eyebrow">
               PROJECTFLOW AI
             </p>
 
-            <h1 style={{ margin: 0, fontSize: "30px" }}>
+            <h1 className="admin-title">
               Administrator dashboard
             </h1>
 
-            <p style={{ color: "#64748b", marginBottom: 0 }}>
+            <p className="admin-dashboard__session">
               Signed in as {session.username}
             </p>
           </div>
 
-          <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
-            <button type="button" onClick={onBack} style={secondaryButtonStyle}>
-              Back to home
-            </button>
+          <div className="admin-dashboard__actions">
+            <Link to="/monitoring" onClick={clearSensitiveState} className="admin-button admin-button--secondary">
+              Monitor all projects
+            </Link>
 
-            <button type="button" onClick={onLogout} style={logoutButtonStyle}>
+            <Link to="/schedule" onClick={clearSensitiveState} className="admin-button admin-button--secondary">
+              Project schedules
+            </Link>
+
+
+            <button type="button" onClick={handleLogout} className="admin-button admin-button--danger">
               Sign out
             </button>
           </div>
         </header>
 
-        <section
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-            gap: "18px",
-            marginBottom: "28px",
-          }}
-        >
-          <article style={cardStyle}>
-            <p style={cardLabelStyle}>Account role</p>
-            <h2 style={cardValueStyle}>Administrator</h2>
-            <p style={cardDescriptionStyle}>
+        <section className="admin-stats">
+          <article className="admin-card admin-stat">
+            <p className="admin-stat__label">Account role</p>
+            <h2 className="admin-stat__value">Administrator</h2>
+            <p className="admin-stat__description">
               Authenticated access to protected knowledge management.
             </p>
           </article>
 
-          <article style={cardStyle}>
-            <p style={cardLabelStyle}>Indexed documents</p>
-            <h2 style={cardValueStyle}>
+          <article className="admin-card admin-stat">
+            <p className="admin-stat__label">Indexed documents</p>
+            <h2 className="admin-stat__value">
               {knowledge ? knowledge.total_documents : "—"}
             </h2>
-            <p style={cardDescriptionStyle}>
+            <p className="admin-stat__description">
               PDF documents indexed for the selected project.
             </p>
           </article>
 
-          <article style={cardStyle}>
-            <p style={cardLabelStyle}>Stored chunks</p>
-            <h2 style={cardValueStyle}>
+          <article className="admin-card admin-stat">
+            <p className="admin-stat__label">Stored chunks</p>
+            <h2 className="admin-stat__value">
               {knowledge ? knowledge.total_chunks : "—"}
             </h2>
-            <p style={cardDescriptionStyle}>
+            <p className="admin-stat__description">
               Text chunks available in the existing ChromaDB collection.
             </p>
           </article>
         </section>
 
-        <section style={{ ...cardStyle, marginBottom: "24px" }}>
-          <h2 style={{ marginTop: 0, marginBottom: "8px" }}>
+
+        <section className="admin-card admin-upload">
+          <h2 className="admin-panel-title">
             Upload project document
           </h2>
 
-          <p style={{ color: "#64748b", lineHeight: 1.6 }}>
+          <p className="admin-intro">
             Upload a PDF to extract text, generate embeddings, identify named
             entities, and add project knowledge to ChromaDB.
           </p>
 
-          <form onSubmit={handleUpload}>
-            <label htmlFor="project-id" style={labelStyle}>
+          <form onSubmit={handleUpload} className="admin-upload__form">
+            <label htmlFor="project-id" className="admin-label admin-upload__project-label">
               Project ID
             </label>
 
@@ -393,62 +388,54 @@ function AdminDashboard({ session, onLogout, onBack }) {
               type="text"
               value={projectId}
               onChange={(event) => {
+                clearSensitiveState();
                 setProjectId(event.target.value);
-                clearKnowledgeResults();
               }}
               placeholder="e.g. OUTDOOR_WIRELESS_AT_MIT"
               maxLength={200}
               required
-              style={inputStyle}
+              className="admin-input admin-upload__project-input"
             />
 
-            <label htmlFor="project-document" style={labelStyle}>
+            <label htmlFor="project-document" className="admin-label admin-upload__file-label">
               PDF document
             </label>
 
             <input
               id="project-document"
+              ref={fileInput}
               type="file"
               accept=".pdf,application/pdf"
-              onChange={(event) =>
-                setSelectedFile(event.target.files?.[0] || null)
-              }
+              onChange={(event) => {
+                cancelRequest("upload");
+                setUploading(false);
+                setMessage("");
+                setError("");
+                setSelectedFile(event.target.files?.[0] || null);
+              }}
               required
-              style={{ ...inputStyle, padding: "10px" }}
+              className="admin-input admin-input--file admin-upload__file-input"
             />
 
-            {message && (
-              <p role="status" style={successMessageStyle}>
-                {message}
-              </p>
-            )}
-
-            {error && (
-              <p role="alert" style={errorMessageStyle}>
-                {error}
-              </p>
-            )}
+            {message && <p role="status" className="admin-message admin-message--success">{message}</p>}
+            {error && <p role="alert" className="admin-message admin-message--error">{error}</p>}
 
             <button
               type="submit"
-              disabled={uploading}
-              style={{
-                ...primaryButtonStyle,
-                opacity: uploading ? 0.7 : 1,
-                cursor: uploading ? "wait" : "pointer",
-              }}
+              disabled={uploading || deletingDocumentId !== null}
+              className="admin-button admin-button--primary admin-upload__submit"
             >
               {uploading ? "Uploading document..." : "Upload PDF"}
             </button>
           </form>
         </section>
 
-        <section style={{ ...cardStyle, marginBottom: "24px" }}>
-          <h2 style={{ marginTop: 0, marginBottom: "8px" }}>
+        <section className="admin-card admin-knowledge">
+          <h2 className="admin-panel-title">
             ChromaDB Knowledge Base
           </h2>
 
-          <p style={{ color: "#64748b", lineHeight: 1.6 }}>
+          <p className="admin-intro">
             Browse, inspect, and delete indexed documents and chunks stored for
             a project. Use the same project ID that you used when uploading
             its PDFs.
@@ -457,25 +444,21 @@ function AdminDashboard({ session, onLogout, onBack }) {
           <button
             type="button"
             onClick={() => loadDocuments()}
-            disabled={loadingDocuments || deletingDocumentId !== null}
-            style={{
-              ...primaryButtonStyle,
-              marginTop: "8px",
-              opacity: loadingDocuments ? 0.7 : 1,
-            }}
+            disabled={loadingDocuments || uploading || deletingDocumentId !== null}
+            className="admin-button admin-button--primary admin-knowledge__load"
           >
             {loadingDocuments ? "Loading knowledge..." : "Load project knowledge"}
           </button>
 
           {knowledgeError && (
-            <p role="alert" style={errorMessageStyle}>
+            <p role="alert" className="admin-message admin-message--error">
               {knowledgeError}
             </p>
           )}
 
           {knowledge && (
-            <div style={{ marginTop: "24px" }}>
-              <div style={summaryStyle}>
+            <div className="admin-knowledge__body">
+              <div className="admin-knowledge__summary">
                 <strong>Project:</strong> {knowledge.project_id}
                 <span>
                   <strong>Documents:</strong> {knowledge.total_documents}
@@ -485,38 +468,31 @@ function AdminDashboard({ session, onLogout, onBack }) {
                 </span>
               </div>
 
-              <h3 style={subheadingStyle}>Indexed documents</h3>
+              <h3 className="admin-subheading">Indexed documents</h3>
 
               {documents.length === 0 ? (
-                <p style={mutedTextStyle}>
+                <p className="admin-muted">
                   No indexed documents were found for this project.
                 </p>
               ) : (
-                <div style={{ display: "grid", gap: "12px" }}>
+                <div className="admin-document-list">
                   {documents.map((document) => (
-                    <article key={document.document_id} style={documentStyle}>
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <h4
-                          style={{
-                            margin: "0 0 8px",
-                            overflowWrap: "anywhere",
-                          }}
-                        >
+                    <article key={document.document_id} className="admin-document">
+                      <div className="admin-document__body">
+                        <h4 className="admin-document__name">
                           {document.name}
                         </h4>
 
-                        <p style={mutedTextStyle}>
+                        <p className="admin-muted">
                           {document.chunks_count} chunks
                         </p>
 
-                        <details>
-                          <summary
-                            style={{ cursor: "pointer", color: "#64748b" }}
-                          >
+                        <details className="admin-details">
+                          <summary className="admin-details__summary">
                             Document metadata
                           </summary>
 
-                          <pre style={metadataStyle}>
+                          <pre className="admin-metadata">
                             {JSON.stringify(
                               {
                                 document_id: document.document_id,
@@ -531,31 +507,12 @@ function AdminDashboard({ session, onLogout, onBack }) {
                         </details>
                       </div>
 
-                      <div
-                        style={{
-                          display: "flex",
-                          gap: "8px",
-                          flexWrap: "wrap",
-                          alignItems: "flex-start",
-                        }}
-                      >
+                      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "flex-start" }}>
                         <button
                           type="button"
                           onClick={() => viewChunks(document)}
-                          disabled={
-                            loadingChunks ||
-                            deletingDocumentId !== null ||
-                            loadingDocuments
-                          }
-                          style={{
-                            ...secondaryButtonStyle,
-                            opacity:
-                              loadingChunks ||
-                              deletingDocumentId !== null ||
-                              loadingDocuments
-                                ? 0.7
-                                : 1,
-                          }}
+                          disabled={loadingChunks || deletingDocumentId !== null || loadingDocuments || uploading}
+                          className="admin-button admin-button--secondary"
                         >
                           View chunks
                         </button>
@@ -563,27 +520,8 @@ function AdminDashboard({ session, onLogout, onBack }) {
                         <button
                           type="button"
                           onClick={() => deleteDocument(document)}
-                          disabled={
-                            deletingDocumentId !== null ||
-                            loadingDocuments ||
-                            loadingChunks
-                          }
-                          style={{
-                            ...secondaryButtonStyle,
-                            color: "#b91c1c",
-                            border: "1px solid #fecaca",
-                            background: "#fff",
-                            opacity:
-                              deletingDocumentId === document.document_id
-                                ? 0.7
-                                : 1,
-                            cursor:
-                              deletingDocumentId !== null ||
-                              loadingDocuments ||
-                              loadingChunks
-                                ? "not-allowed"
-                                : "pointer",
-                          }}
+                          disabled={deletingDocumentId !== null || loadingDocuments || loadingChunks || uploading}
+                          className="admin-button admin-button--danger"
                         >
                           {deletingDocumentId === document.document_id
                             ? "Deleting..."
@@ -596,47 +534,37 @@ function AdminDashboard({ session, onLogout, onBack }) {
               )}
 
               {selectedDocument && (
-                <div style={{ marginTop: "28px" }}>
-                  <h3 style={subheadingStyle}>
+                <div className="admin-chunks">
+                  <h3 className="admin-subheading">
                     Chunks: {selectedDocument.name}
                   </h3>
 
                   {loadingChunks && (
-                    <p style={mutedTextStyle}>Loading stored chunks...</p>
+                    <p className="admin-muted">Loading stored chunks...</p>
                   )}
 
                   {!loadingChunks && chunks.length === 0 && (
-                    <p style={mutedTextStyle}>No chunks to display.</p>
+                    <p className="admin-muted">No chunks to display.</p>
                   )}
 
-                  <div style={{ display: "grid", gap: "14px" }}>
+                  <div className="admin-result-list">
                     {chunks.map((chunk) => (
-                      <article key={chunk.chunk_id} style={chunkStyle}>
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: "10px",
-                            flexWrap: "wrap",
-                            marginBottom: "12px",
-                          }}
-                        >
+                      <article key={chunk.chunk_id} className="admin-result">
+                        <div className="admin-result__header admin-result__header--chunk">
                           <strong>Chunk {chunk.chunk_index}</strong>
-                          <span style={chipStyle}>Stored in ChromaDB</span>
+                          <span className="admin-chip">Stored in ChromaDB</span>
                         </div>
 
-                        <p style={{ whiteSpace: "pre-wrap", lineHeight: 1.65 }}>
+                        <p className="admin-result__text">
                           {chunk.text || "(No text stored)"}
                         </p>
 
-                        <details>
-                          <summary
-                            style={{ cursor: "pointer", color: "#64748b" }}
-                          >
+                        <details className="admin-details">
+                          <summary className="admin-details__summary">
                             View chunk metadata
                           </summary>
 
-                          <pre style={metadataStyle}>
+                          <pre className="admin-metadata">
                             {JSON.stringify(
                               {
                                 chunk_id: chunk.chunk_id,
@@ -656,88 +584,80 @@ function AdminDashboard({ session, onLogout, onBack }) {
           )}
         </section>
 
-        <section style={cardStyle}>
-          <h2 style={{ marginTop: 0, marginBottom: "8px" }}>
+        <section className="admin-card admin-search">
+          <h2 className="admin-panel-title">
             Search project knowledge
           </h2>
 
-          <p style={{ color: "#64748b", lineHeight: 1.6 }}>
+          <p className="admin-intro">
             Search relevant document chunks and any matching Planning Agent
             knowledge available through the existing search endpoint.
           </p>
 
-          <form onSubmit={handleSearch}>
-            <label htmlFor="knowledge-query" style={labelStyle}>
+          <form onSubmit={handleSearch} className="admin-search__form">
+            <label htmlFor="knowledge-query" className="admin-label">
               Search question or phrase
             </label>
 
             <textarea
               id="knowledge-query"
               value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
+              onChange={(event) => {
+                cancelRequest("search");
+                setSearching(false);
+                setSearchResults([]);
+                setSearchQuery(event.target.value);
+              }}
               placeholder="e.g. What are the project's main resource risks?"
               rows={3}
-              style={{ ...inputStyle, resize: "vertical" }}
+              className="admin-input admin-input--textarea"
               required
             />
 
             <button
               type="submit"
-              disabled={searching}
-              style={{
-                ...primaryButtonStyle,
-                opacity: searching ? 0.7 : 1,
-              }}
+              disabled={searching || deletingDocumentId !== null}
+              className="admin-button admin-button--primary admin-search__submit"
             >
               {searching ? "Searching..." : "Search knowledge"}
             </button>
           </form>
 
           {searchResults.length > 0 && (
-            <div style={{ marginTop: "24px" }}>
-              <h3 style={subheadingStyle}>
+            <div className="admin-search__results">
+              <h3 className="admin-subheading">
                 Search results ({searchResults.length})
               </h3>
 
-              <div style={{ display: "grid", gap: "14px" }}>
+              <div className="admin-result-list">
                 {searchResults.map((result, index) => (
                   <article
                     key={result.chunk_id || result.record_id || index}
-                    style={chunkStyle}
+                    className="admin-result"
                   >
-                    <div
-                      style={{
-                        display: "flex",
-                        flexWrap: "wrap",
-                        gap: "8px",
-                        alignItems: "center",
-                        marginBottom: "10px",
-                      }}
-                    >
-                      <span style={chipStyle}>
+                    <div className="admin-result__header">
+                      <span className="admin-chip">
                         {result.knowledge_type || "Knowledge"}
                       </span>
                       <strong>{result.source || "Unknown source"}</strong>
                     </div>
 
                     {result.score != null && (
-                      <p style={mutedTextStyle}>
+                      <p className="admin-muted">
                         Relevance score: {Number(result.score).toFixed(4)}
                       </p>
                     )}
 
-                    <p style={{ whiteSpace: "pre-wrap", lineHeight: 1.65 }}>
+                    <p className="admin-result__text">
                       {result.content || "(No content returned)"}
                     </p>
 
-                    <details>
-                      <summary
-                        style={{ cursor: "pointer", color: "#64748b" }}
-                      >
+                    <details className="admin-details">
+                      <summary className="admin-details__summary">
                         Result metadata
                       </summary>
 
-                      <pre style={metadataStyle}>
+                      <pre className="admin-metadata">
                         {JSON.stringify(
                           {
                             chunk_id: result.chunk_id,
@@ -758,7 +678,7 @@ function AdminDashboard({ session, onLogout, onBack }) {
           {!searching &&
             searchResults.length === 0 &&
             searchQuery.trim() !== "" && (
-              <p style={mutedTextStyle}>
+              <p className="admin-muted">
                 Run a search to see matching knowledge here.
               </p>
             )}
@@ -768,166 +688,6 @@ function AdminDashboard({ session, onLogout, onBack }) {
   );
 }
 
-const cardStyle = {
-  padding: "26px",
-  border: "1px solid #e2e8f0",
-  borderRadius: "16px",
-  background: "#ffffff",
-  boxShadow: "0 8px 24px rgba(15, 23, 42, 0.04)",
-};
 
-const cardLabelStyle = {
-  margin: "0 0 10px",
-  color: "#64748b",
-  fontSize: "13px",
-};
-
-const cardValueStyle = {
-  margin: "0 0 10px",
-  fontSize: "21px",
-};
-
-const cardDescriptionStyle = {
-  margin: 0,
-  color: "#64748b",
-  fontSize: "13px",
-  lineHeight: 1.6,
-};
-
-const labelStyle = {
-  display: "block",
-  margin: "20px 0 8px",
-  color: "#334155",
-  fontSize: "13px",
-  fontWeight: 600,
-};
-
-const inputStyle = {
-  display: "block",
-  boxSizing: "border-box",
-  width: "100%",
-  padding: "12px 13px",
-  border: "1px solid #cbd5e1",
-  borderRadius: "9px",
-  background: "#ffffff",
-  color: "#172033",
-  fontSize: "14px",
-};
-
-const primaryButtonStyle = {
-  marginTop: "22px",
-  padding: "13px 20px",
-  border: 0,
-  borderRadius: "9px",
-  background: "linear-gradient(135deg, #4f46e5, #7c3aed)",
-  color: "#ffffff",
-  fontSize: "14px",
-  fontWeight: 700,
-  cursor: "pointer",
-};
-
-const secondaryButtonStyle = {
-  padding: "11px 16px",
-  border: "1px solid #cbd5e1",
-  borderRadius: "9px",
-  background: "#ffffff",
-  color: "#334155",
-  cursor: "pointer",
-  flexShrink: 0,
-};
-
-const logoutButtonStyle = {
-  padding: "11px 16px",
-  border: 0,
-  borderRadius: "9px",
-  background: "#fee2e2",
-  color: "#b91c1c",
-  cursor: "pointer",
-  fontWeight: 600,
-};
-
-const successMessageStyle = {
-  padding: "12px",
-  borderRadius: "8px",
-  background: "#ecfdf5",
-  color: "#047857",
-  lineHeight: 1.6,
-  overflowWrap: "anywhere",
-};
-
-const errorMessageStyle = {
-  padding: "12px",
-  borderRadius: "8px",
-  background: "#fef2f2",
-  color: "#b91c1c",
-  lineHeight: 1.6,
-  overflowWrap: "anywhere",
-};
-
-const summaryStyle = {
-  display: "flex",
-  flexWrap: "wrap",
-  gap: "16px",
-  padding: "14px",
-  borderRadius: "10px",
-  background: "#f8fafc",
-  color: "#334155",
-  fontSize: "13px",
-};
-
-const subheadingStyle = {
-  marginTop: "24px",
-  marginBottom: "14px",
-  fontSize: "17px",
-};
-
-const mutedTextStyle = {
-  color: "#64748b",
-  fontSize: "13px",
-  lineHeight: 1.6,
-  overflowWrap: "anywhere",
-};
-
-const documentStyle = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "flex-start",
-  gap: "16px",
-  flexWrap: "wrap",
-  padding: "18px",
-  border: "1px solid #e2e8f0",
-  borderRadius: "12px",
-  background: "#ffffff",
-};
-
-const chunkStyle = {
-  padding: "18px",
-  border: "1px solid #e2e8f0",
-  borderRadius: "12px",
-  background: "#ffffff",
-  overflowWrap: "anywhere",
-};
-
-const chipStyle = {
-  display: "inline-block",
-  padding: "5px 9px",
-  borderRadius: "20px",
-  background: "#eef2ff",
-  color: "#4338ca",
-  fontSize: "12px",
-  fontWeight: 600,
-};
-
-const metadataStyle = {
-  marginTop: "12px",
-  padding: "12px",
-  borderRadius: "8px",
-  background: "#f8fafc",
-  color: "#334155",
-  fontSize: "12px",
-  whiteSpace: "pre-wrap",
-  overflowWrap: "anywhere",
-  overflowX: "auto",
-};
 
 export default AdminDashboard;
