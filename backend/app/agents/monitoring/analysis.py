@@ -7,6 +7,7 @@ from typing import Literal
 from .schemas import (
     ActualProjectSnapshot,
     MilestoneAssessment,
+    MonitoringCoverage,
     MonitoringMetrics,
     MonitoringSettings,
     MonitoringWarning,
@@ -79,6 +80,11 @@ def assess_tasks(planning: PlanningSnapshot, actual: ActualProjectSnapshot,
             planned_deadline_passed=record is None and as_of > planned.due_date,
             actual_is_stale=stale,
             last_observed_progress=record.progress if record is not None and stale else None,
+            is_critical=planned.is_critical,
+            planned_start=planned.start_date, due_date=planned.due_date,
+            actual_start=record.actual_start if record is not None else None,
+            completed_on=record.completed_on if record is not None else None,
+            last_updated_on=record.updated_on if record is not None else None,
         )
         for child in children[task_id]:
             pending[child] -= 1
@@ -111,6 +117,42 @@ def calculate_metrics(tasks: list[TaskAssessment], risk: RiskSnapshot | None) ->
         expected_progress=expected,
         progress_variance=round(actual - expected, 2) if actual is not None and expected is not None else None,
         actual_progress_is_lower_bound=False,
+    )
+
+
+def calculate_coverage(planning: PlanningSnapshot, actual: ActualProjectSnapshot,
+                       tasks: list[TaskAssessment], risk: RiskSnapshot | None,
+                       as_of: date, settings: MonitoringSettings, *,
+                       risk_unavailable: bool = False) -> MonitoringCoverage:
+    """Describe usable observations, not inferred execution or missing-source success."""
+    total = len(tasks)
+    missing = sum(task.status == "missing" for task in tasks)
+    stale = sum(task.actual_is_stale or task.status == "stale" for task in tasks)
+    fresh = total - missing - stale
+    if not total or missing == total:
+        actual_status = "missing"
+    elif stale and not fresh:
+        actual_status = "stale"
+    elif missing or stale:
+        actual_status = "partial"
+    else:
+        actual_status = "complete"
+    planning_freshness = ("unknown" if planning.updated_on is None else
+                          "stale" if (as_of - planning.updated_on).days > settings.stale_after_days else "known")
+    risk_status = ("unavailable" if risk_unavailable else "not_supplied" if risk is None else
+                   "stale" if (as_of - risk.updated_on).days > settings.stale_after_days else "available")
+    targets = sum(task.expected_progress is not None for task in planning.tasks)
+    method = ("unavailable" if not total else "supplied_target" if targets == total else
+              "mixed" if targets else "calendar_estimate")
+    return MonitoringCoverage(
+        planning_freshness=planning_freshness, actual_status=actual_status,
+        risk_status=risk_status, milestones_status="available" if planning.milestones else "not_supplied",
+        total_tasks=total, fresh_actual_tasks=fresh, missing_actual_tasks=missing, stale_actual_tasks=stale,
+        planning_updated_on=planning.updated_on, planning_observed_on=planning.fetched_on,
+        actual_updated_on=(None if actual.context.get("snapshot_date_basis") == "observation" else actual.updated_on),
+        actual_observed_on=actual.observed_on,
+        risk_observed_on=risk.observed_on if risk is not None else None,
+        expected_progress_method=method,
     )
 
 
@@ -184,7 +226,7 @@ def create_warnings(planning: PlanningSnapshot, tasks: list[TaskAssessment],
                     warnings.append(MonitoringWarning(code="BLOCKED_TASK", severity="warning",
                         message=f"{task.title} is blocked", task_ids=[task.task_id], source_refs=source))
                 if task.overdue_days:
-                    severity = "critical" if planned[task.task_id].priority in ("high", "critical") else "warning"
+                    severity = "critical" if task.is_critical or planned[task.task_id].priority in ("high", "critical") else "warning"
                     warnings.append(MonitoringWarning(code="OVERDUE_TASK", severity=severity,
                         message=f"{task.title} is {task.overdue_days} day(s) overdue", task_ids=[task.task_id], source_refs=source))
                 elif task.delayed:
@@ -241,7 +283,7 @@ def classify_project(planning: PlanningSnapshot, tasks: list[TaskAssessment],
                      warnings: list[MonitoringWarning], settings: MonitoringSettings) -> Literal["ON_TRACK", "AT_RISK", "DELAYED"]:
     priorities = {task.task_id: task.priority for task in planning.tasks}
     if any(t.status not in ("missing", "stale") and not t.actual_is_stale
-           and t.overdue_days and priorities[t.task_id] in ("high", "critical") for t in tasks) or any(
+           and t.overdue_days and (t.is_critical or priorities[t.task_id] in ("high", "critical")) for t in tasks) or any(
         m.status == "Delayed" for m in milestones
     ) or (metrics.progress_variance is not None and metrics.progress_variance <= -settings.delayed_variance):
         return "DELAYED"
@@ -254,7 +296,8 @@ def classify_project(planning: PlanningSnapshot, tasks: list[TaskAssessment],
         or any(m.status == "At Risk" for m in milestones)
         or any(w.code in ("STALE_PLAN", "STALE_ACTUAL", "STALE_ACTUAL_TASK", "BLOCKED_TASK",
                           "MISSING_ACTUAL", "PLANNED_DEADLINE_PASSED",
-                          "LATE_START", "BASELINE_DEADLINE_NOT_MET", "PLANNING_WARNING") for w in warnings)
+                          "LATE_START", "BASELINE_DEADLINE_NOT_MET", "PLANNING_WARNING",
+                          "RISK_UNAVAILABLE", "STALE_RISK") for w in warnings)
         or (metrics.progress_variance is not None and metrics.progress_variance <= -settings.at_risk_variance)):
         return "AT_RISK"
     return "ON_TRACK"

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { createSchedule } from "../services/planningApi";
+import { createSchedule, planningErrorMessage } from "../services/planningApi";
 
 function getToday() {
   const now = new Date();
@@ -72,7 +72,7 @@ function ConfidenceBanner({ responsibleAi }) {
   );
 }
 
-function Planning() {
+function Planning({ session, onUnauthorized }) {
   const location = useLocation();
   const draft = location.state?.coordinatorDraft;
   const [form, setForm] = useState(() => ({
@@ -159,13 +159,11 @@ function Planning() {
     setLoading(true);
 
     try {
-      const schedule = await createSchedule(form);
+      const schedule = await createSchedule(form, { session });
       setResult(schedule);
     } catch (err) {
-      setError(
-        err?.message ||
-          "Unable to generate the project schedule."
-      );
+      if (err.status === 401) onUnauthorized?.(session);
+      setError(planningErrorMessage(err));
     } finally {
       setLoading(false);
     }

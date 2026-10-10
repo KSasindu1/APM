@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # ---------------------------------------------------------
 
 from app.api.auth import router as auth_router
+from app.api.accounts import router as accounts_router
 from app.api.risks import router as risk_router
 from app.api.planning import router as planning_router
 from app.agents.coordinator.router import router as coordinator_router
@@ -28,6 +29,7 @@ from app.core.config import (
     get_settings,
     validate_configuration,
 )
+from app.agents.monitoring.api import create_shared_router
 
 # ---------------------------------------------------------
 # Logging
@@ -110,7 +112,7 @@ app = FastAPI(
         "AI-powered multi-agent project management "
         "system with Planning & Scheduling, "
         "Risk & Knowledge Retrieval, "
-        "Monitoring, and Admin Authentication."
+        "Monitoring & Reporting, and Admin Authentication."
     ),
     version="1.0.0",
     lifespan=lifespan,
@@ -135,6 +137,14 @@ app.add_middleware(
 # ---------------------------------------------------------
 
 app.include_router(auth_router)
+app.include_router(accounts_router)
+
+app.include_router(
+    create_shared_router(
+        app,
+        planning_api_key=settings.planning_api_key,
+    )
+)
 
 
 # ---------------------------------------------------------

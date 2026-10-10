@@ -1,12 +1,19 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { interpretProjectInput } from "../services/coordinatorApi";
+import { coordinatorErrorMessage, interpretProjectInput } from "../services/coordinatorApi";
 import "./Coordinator.css";
 
 const initial = { project_name: "", objective: "", start_date: "", deadline: "", message: "Create a schedule and assess deadline feasibility." };
 const example = "Project: Inventory System. Build a web application to manage stock and sales. Start date: 2026-10-12. Deadline: 2026-12-12. We have 3 developers and 1 tester. Prioritize stock tracking and leave time for testing.";
 
-export default function Coordinator() {
+export default function Coordinator({ session, onUnauthorized }) {
+  if (!session) return <main className="coordinator-page"><p role="alert">Sign in to use the Coordinator. <Link to="/login">Sign in</Link></p></main>;
+  // A different login must not inherit another session's draft or pending extraction.
+  const key = JSON.stringify([session.access_token, session.username, session.user_id, session.role, session.expires_at]);
+  return <CoordinatorWorkspace key={key} session={session} onUnauthorized={onUnauthorized} />;
+}
+
+function CoordinatorWorkspace({ session, onUnauthorized }) {
   const navigate = useNavigate();
   const [mode, setMode] = useState("natural");
   const [text, setText] = useState("");
@@ -16,20 +23,53 @@ export default function Coordinator() {
   const [interpretation, setInterpretation] = useState(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [locked, setLocked] = useState(false);
+  const request = useRef({ mounted: false, controller: null });
+  const disabled = !!busy || locked;
+
+  useEffect(() => {
+    const lifecycle = request.current;
+    lifecycle.mounted = true;
+    return () => {
+      lifecycle.mounted = false;
+      lifecycle.controller?.abort();
+      lifecycle.controller = null;
+    };
+  }, []);
+
   const update = (key, value) => setForm((current) => ({ ...current, [key]: value }));
 
   async function interpret() {
+    if (locked) return;
+    request.current.controller?.abort();
+    const controller = new AbortController();
+    request.current.controller = controller;
+    const isCurrent = () => request.current.mounted && request.current.controller === controller && !controller.signal.aborted;
     setBusy("interpret"); setError("");
     try {
-      const data = await interpretProjectInput(text);
+      const data = await interpretProjectInput(text, { session, signal: controller.signal, onUnauthorized });
+      if (!isCurrent()) return;
       setInterpretation(data); setForm({ ...initial, ...data.draft });
       setResources(data.draft.resources || []); setTasks([]); setMode("form");
-    } catch (exc) { setError(exc.message); }
-    finally { setBusy(""); }
+    } catch (exc) {
+      if (!isCurrent() || exc?.name === "AbortError") return;
+      if (exc.status === 401) setLocked(true);
+      setError(coordinatorErrorMessage(exc));
+    } finally {
+      if (isCurrent()) { request.current.controller = null; setBusy(""); }
+    }
+  }
+
+  function cancelInterpretation() {
+    request.current.controller?.abort();
+    request.current.controller = null;
+    setBusy("");
   }
 
   function submit(event) {
-    event.preventDefault(); setError("");
+    event.preventDefault();
+    if (disabled) return;
+    setError("");
     if (form.deadline < form.start_date) { setError("Deadline must be on or after the start date."); return; }
     const name = form.project_name.trim();
     const objective = form.objective.trim();
@@ -57,14 +97,14 @@ export default function Coordinator() {
     <div className="coord-layout">
       <section className="coord-window" aria-labelledby="input-title">
         <div className="coord-window-bar"><i /><span id="input-title">Project input window</span><small>01 / INPUT</small></div>
-        <div className="coord-tabs" role="group" aria-label="Input method"><button type="button" aria-pressed={mode === "natural"} disabled={!!busy} onClick={() => setMode("natural")}>Describe in your words</button><button type="button" aria-pressed={mode === "form"} disabled={!!busy} onClick={() => setMode("form")}>Project details</button></div>
+        <div className="coord-tabs" role="group" aria-label="Input method"><button type="button" aria-pressed={mode === "natural"} disabled={disabled} onClick={() => setMode("natural")}>Describe in your words</button><button type="button" aria-pressed={mode === "form"} disabled={disabled} onClick={() => setMode("form")}>Project details</button></div>
         {mode === "natural" ? <div className="coord-body">
           <span className="coord-tag">NATURAL LANGUAGE INPUT</span><h2>What would you like to build?</h2><p>Include the project name, goal, dates, and team. We’ll turn your description into editable project details.</p>
-          <label htmlFor="coord-description">Your project description</label><textarea id="coord-description" className="coord-prompt" value={text} maxLength={5000} disabled={!!busy} onChange={(e) => setText(e.target.value)} placeholder={example} />
-          <div className="coord-prompt-footer"><span>{text.length} / 5,000 characters</span><button className="coord-text-button" type="button" disabled={!!busy} onClick={() => setText(example)}>Try an example</button></div>
+          <label htmlFor="coord-description">Your project description</label><textarea id="coord-description" className="coord-prompt" value={text} maxLength={5000} disabled={disabled} onChange={(e) => setText(e.target.value)} placeholder={example} />
+          <div className="coord-prompt-footer"><span>{text.length} / 5,000 characters</span><button className="coord-text-button" type="button" disabled={disabled} onClick={() => setText(example)}>Try an example</button></div>
           <div className="coord-hint"><strong>For accurate extraction</strong><p>Use dates like 2026-10-12 and a name like “Project: Inventory System”. Relative dates such as “next month” need manual entry.</p><p>Extracting again replaces the current draft, including edited tasks and resources.</p></div>
-          <button className="coord-primary" type="button" disabled={!!busy || text.trim().length < 10} onClick={interpret}>{busy === "interpret" ? "Reading your description…" : "Extract project details →"}</button><p className="coord-footnote">Local rule-based NLP. Review details before sending to Planning.</p>
-        </div> : <form className="coord-body" onSubmit={submit}><fieldset disabled={!!busy}>
+          <button className="coord-primary" type="button" disabled={disabled || text.trim().length < 10} onClick={interpret}>{busy === "interpret" ? "Reading your description…" : "Extract project details →"}</button><p className="coord-footnote">Local rule-based NLP. Review details before sending to Planning.</p>
+        </div> : <form className="coord-body" onSubmit={submit}><fieldset disabled={disabled}>
           <legend>{interpretation ? "Review your extracted project" : "Tell us about your project"}</legend>
           {interpretation && <div className="coord-hint"><strong>Details extracted — ready for review</strong><p>{interpretation.missing_fields.length ? `Please complete: ${interpretation.missing_fields.map((key) => key.replaceAll("_", " ")).join(", ")}.` : "Check the details before continuing to Planning."}</p>{interpretation.notes.map((note) => <p key={note}>{note}</p>)}</div>}
           <label>Project name<input required maxLength={200} value={form.project_name} onChange={(e) => update("project_name", e.target.value)} placeholder="e.g. Inventory System" /></label>
@@ -79,7 +119,7 @@ export default function Coordinator() {
       </section>
       <aside className="coord-sidebar"><span className="coord-tag">HOW IT WORKS</span><h2>One request.<br />A clear next step.</h2><ol>{[["Capture your project", "Use the form or describe it naturally."], ["Review the details", "Check goals, dates, and team capacity."], ["Open Planning", "Your reviewed details are filled into the Planning form."], ["Generate your plan there", "The Planning Agent runs only when you submit its form."]].map(([title, description]) => <li key={title}><strong>{title}</strong><p>{description}</p></li>)}</ol><div className="coord-scope"><span>CONNECTED WORKFLOW</span><strong>Planning & Scheduling</strong><p>Includes Planning’s existing risk workflow. Actual-progress monitoring is not performed.</p></div></aside>
     </div>
-    {busy && <p className="coord-feedback" role="status">Extracting project details…</p>}{error && <p className="coord-error" role="alert">{error}</p>}
+    {busy && <><p className="coord-feedback" role="status">Extracting project details…</p><button className="coord-text-button" type="button" onClick={cancelInterpretation}>Cancel extraction</button></>}{error && <p className="coord-error" role="alert">{error}</p>}
 
   </main>;
 }

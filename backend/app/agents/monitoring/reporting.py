@@ -8,7 +8,9 @@ from uuid import uuid4
 from pydantic import JsonValue
 
 from .schemas import (
+    ActualProjectSnapshot,
     MilestoneAssessment,
+    MonitoringCoverage,
     MonitoringMetrics,
     MonitoringReport,
     MonitoringRequest,
@@ -25,7 +27,8 @@ from .schemas import (
 
 def verified_facts(metrics: MonitoringMetrics, milestones: list[MilestoneAssessment],
                    status: str, risk_supplied: bool,
-                   warnings: list[MonitoringWarning]) -> list[SummaryFact]:
+                   warnings: list[MonitoringWarning],
+                   coverage: MonitoringCoverage | None = None) -> list[SummaryFact]:
     reasons = list(dict.fromkeys(w.code.replace("_", " ").lower() for w in warnings))
     if metrics.progress_variance is not None and metrics.progress_variance < 0:
         reasons.append(f"progress variance {metrics.progress_variance:+} points")
@@ -40,22 +43,32 @@ def verified_facts(metrics: MonitoringMetrics, milestones: list[MilestoneAssessm
             f"of {metrics.expected_progress}% (variance {metrics.progress_variance:+} percentage points)."),
             source_refs=["planning:snapshot", "actual:snapshot"]))
     else:
-        coverage = (f"Progress cannot be calculated: {metrics.missing_actual_tasks} of "
-                    f"{metrics.total_tasks} planned tasks have no actual record")
+        progress_coverage = (f"Progress cannot be calculated: {metrics.missing_actual_tasks} of "
+                             f"{metrics.total_tasks} planned tasks have no actual record")
         if metrics.stale_actual_tasks:
-            coverage += f"; {metrics.stale_actual_tasks} task(s) have stale unfinished actual records"
-        facts.append(SummaryFact(fact_id="coverage", text=coverage + ".",
+            progress_coverage += f"; {metrics.stale_actual_tasks} task(s) have stale unfinished actual records"
+        facts.append(SummaryFact(fact_id="coverage", text=progress_coverage + ".",
             source_refs=["planning:snapshot", "actual:snapshot"]))
+    scope = " (fresh observed task records only)" if metrics.missing_actual_tasks or metrics.stale_actual_tasks else ""
     facts.append(SummaryFact(fact_id="tasks", text=(
-        f"{metrics.overdue_tasks} task(s) are overdue and {metrics.delayed_tasks} are delayed."),
+        f"{metrics.overdue_tasks} task(s) are overdue and {metrics.delayed_tasks} are delayed{scope}."),
         source_refs=["planning:snapshot", "actual:snapshot"]))
-    facts.append(SummaryFact(fact_id="milestones", text=(
-        f"{sum(m.status == 'Delayed' for m in milestones)} milestone(s) are delayed and "
-        f"{sum(m.status == 'At Risk' for m in milestones)} are at risk."),
+    milestone_text = ("No milestone definitions were supplied; milestone coverage is unknown."
+                      if coverage is not None and coverage.milestones_status == "not_supplied" else
+                      f"{sum(m.status == 'Delayed' for m in milestones)} milestone(s) are delayed and "
+                      f"{sum(m.status == 'At Risk' for m in milestones)} are at risk.")
+    facts.append(SummaryFact(fact_id="milestones", text=milestone_text,
         source_refs=[f"milestone:{m.milestone_id}" for m in milestones]))
     if risk_supplied:
         facts.append(SummaryFact(fact_id="risks", text=f"{metrics.high_risks} open high/critical risk(s) were supplied.",
             source_refs=["risk:snapshot"]))
+    if not risk_supplied or coverage is not None and coverage.risk_status != "available":
+        reason = ("Risk Agent unavailable" if coverage is not None and coverage.risk_status == "unavailable" else
+                  "risk snapshot is stale" if coverage is not None and coverage.risk_status == "stale" else
+                  "no risk snapshot supplied")
+        facts.append(SummaryFact(fact_id="risk_coverage",
+            text=f"Current risk coverage is unknown ({reason}); a zero risk count does not establish no risks.",
+            source_refs=["monitoring:coverage"]))
     return facts
 
 
@@ -117,8 +130,10 @@ async def build_report(request: MonitoringRequest, requested_by: str,
                        summarizer: MonitoringSummarizer | None = None,
                        risk_supplied: bool = False,
                        risk: RiskSnapshot | None = None,
-                       planning: PlanningSnapshot | None = None) -> MonitoringReport:
-    facts = verified_facts(metrics, milestones, status, risk_supplied, warnings)
+                       planning: PlanningSnapshot | None = None,
+                       coverage: MonitoringCoverage | None = None,
+                       actual: ActualProjectSnapshot | None = None) -> MonitoringReport:
+    facts = verified_facts(metrics, milestones, status, risk_supplied, warnings, coverage)
     late_starts = [task for task in tasks if task.status != "missing" and task.start_delay_days > 0
                    and (task.actual_progress is not None or task.status == "stale" or task.actual_is_stale)]
     if late_starts:
@@ -137,7 +152,9 @@ async def build_report(request: MonitoringRequest, requested_by: str,
             if ("status" not in selection.fact_ids or len(set(selection.fact_ids)) != len(selection.fact_ids)
                     or not set(selection.fact_ids) <= allowed):
                 raise ValueError("Summarizer selected invalid fact IDs")
-            selected = selection.fact_ids
+            selected = list(selection.fact_ids)
+            if "risk_coverage" in allowed and "risk_coverage" not in selected:
+                selected.append("risk_coverage")
             method = "llm_extractive"
         except Exception:  # noqa: BLE001 - Any selector failure must retain a deterministic report.
             limitations.append("AI fact selection unavailable or invalid; deterministic summary used")
@@ -164,5 +181,6 @@ async def build_report(request: MonitoringRequest, requested_by: str,
         risk_evidence_used=risk.evidence_used if risk is not None else [],
         risk_knowledge_sources=risk.knowledge_sources if risk is not None else [],
         planning_context=planning.context if planning is not None else {},
+        actual_context=actual.context if actual is not None else {}, coverage=coverage,
         planning_feedback=_planning_feedback(request, tasks, planning),
     )

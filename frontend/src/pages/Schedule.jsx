@@ -1,10 +1,15 @@
 import {
+  useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
 import {
+  Link,
+  useLocation,
   useNavigate,
   useParams,
 } from "react-router-dom";
@@ -14,6 +19,7 @@ import {
   getAllSchedules,
   updateSchedule,
   deleteSchedule,
+  planningErrorMessage,
 } from "../services/planningApi";
 
 
@@ -925,13 +931,17 @@ function ProjectTable({
 }
 
 
-function Schedule() {
+function Schedule({ session, onUnauthorized }) {
 
   const {
     projectId: routeProjectId,
   } = useParams();
 
   const navigate = useNavigate();
+  const { key: routeKey } = useLocation();
+  const currentProjectId = routeProjectId
+    ? decodeURIComponent(routeProjectId).trim()
+    : "";
 
 
   /*
@@ -948,11 +958,19 @@ function Schedule() {
     );
 
 
-  const [projects, setProjects] =
-    useState([]);
-
-  const [schedule, setSchedule] =
+  const [projectList, setProjects] =
     useState(null);
+
+  const [storedSchedule, setSchedule] =
+    useState(null);
+
+  const projects = projectList && projectList.session === session
+    ? projectList.projects
+    : [];
+  const schedule = storedSchedule && storedSchedule.session === session &&
+    storedSchedule.result.project_id === currentProjectId
+    ? storedSchedule.result
+    : null;
 
   const [loading, setLoading] =
     useState(false);
@@ -970,37 +988,86 @@ function Schedule() {
     useState(null);
 
 
-  async function loadProjects() {
+  const scope = useRef({ mounted: false, generation: 0, requests: new Map() });
 
+  const cancelRequest = useCallback((kind) => {
+    scope.current.requests.get(kind)?.controller.abort();
+    scope.current.requests.delete(kind);
+  }, []);
+
+  const invalidateRequests = useCallback(() => {
+    const current = scope.current;
+    current.generation += 1;
+    current.requests.forEach(operation => operation.controller.abort());
+    current.requests.clear();
+  }, []);
+
+  // Invalidate at commit, before a late response can affect another route/account.
+  useLayoutEffect(() => {
+    const current = scope.current;
+    current.mounted = true;
+    current.session = session;
+    current.projectId = currentProjectId;
+    current.routeKey = routeKey;
+    return () => {
+      current.mounted = false;
+      invalidateRequests();
+    };
+  }, [session, currentProjectId, routeKey, invalidateRequests]);
+
+  const beginRequest = useCallback((kind) => {
+    const current = scope.current;
+    if (!current.mounted || current.session !== session ||
+      current.projectId !== currentProjectId || current.routeKey !== routeKey) return null;
+    cancelRequest(kind);
+    const operation = { kind, generation: current.generation, controller: new AbortController() };
+    current.requests.set(kind, operation);
+    return operation;
+  }, [session, currentProjectId, routeKey, cancelRequest]);
+
+  const isCurrent = useCallback((operation) => {
+    const current = scope.current;
+    return current.mounted && current.generation === operation.generation &&
+      current.session === session && current.projectId === currentProjectId &&
+      current.routeKey === routeKey && current.requests.get(operation.kind) === operation &&
+      !operation.controller.signal.aborted;
+  }, [session, currentProjectId, routeKey]);
+
+  const finishRequest = useCallback((operation, setBusy) => {
+    if (!isCurrent(operation)) return;
+    scope.current.requests.delete(operation.kind);
+    setBusy(false);
+  }, [isCurrent]);
+
+  const loadProjects = useCallback(async () => {
+
+    const operation = beginRequest("list");
+    if (!operation) return;
     setProjectsLoading(true);
 
     try {
 
       const result =
-        await getAllSchedules();
+        await getAllSchedules({ session, signal: operation.controller.signal });
 
-      setProjects(
-        Array.isArray(result)
-          ? result
-          : []
-      );
+      if (!isCurrent(operation)) return;
+      setProjects({ session, projects: Array.isArray(result) ? result : [] });
 
     } catch (err) {
 
-      console.error(
-        "Unable to load projects:",
-        err
-      );
+      if (!isCurrent(operation) || err?.name === "AbortError") return;
+      if (err.status === 401) onUnauthorized?.(session);
+      setError(planningErrorMessage(err));
 
     } finally {
 
-      setProjectsLoading(false);
+      finishRequest(operation, setProjectsLoading);
 
     }
-  }
+  }, [beginRequest, isCurrent, finishRequest, session, onUnauthorized]);
 
 
-  async function loadSchedule(id) {
+  function loadSchedule(id) {
 
     const cleanId =
       String(id || "").trim();
@@ -1014,57 +1081,28 @@ function Schedule() {
       return;
     }
 
-    setLoading(true);
+    invalidateRequests();
+    setSchedule(null);
+    setLoading(false);
+    setProjectsLoading(false);
     setError("");
     setMessage("");
+    setProjectId(cleanId);
+    setExpandedTask(null);
 
-    try {
-
-      const result =
-        await getSchedule(cleanId);
-
-      setSchedule(result);
-
-      setProjectId(cleanId);
-
-      setExpandedTask(null);
-
-      navigate(
-        `/schedule/${encodeURIComponent(
-          cleanId
-        )}`,
-        {
-          replace: true,
-        }
-      );
-
-    } catch (err) {
-
-      setSchedule(null);
-
-      setError(
-        err?.message ||
-          "Unable to load the schedule."
-      );
-
-    } finally {
-
-      setLoading(false);
-
-    }
+    navigate(
+      `/schedule/${encodeURIComponent(cleanId)}`,
+      { replace: true }
+    );
   }
 
 
-  async function loadScheduleWithoutNavigation(
-    id
-  ) {
+  const loadScheduleWithoutNavigation = useCallback(async (id) => {
 
-    const cleanId =
-      String(id || "").trim();
-
-    if (!cleanId) {
-      return;
-    }
+    const cleanId = String(id || "").trim();
+    if (!cleanId) return;
+    const operation = beginRequest("detail");
+    if (!operation) return;
 
     setLoading(true);
     setError("");
@@ -1073,58 +1111,46 @@ function Schedule() {
     try {
 
       const result =
-        await getSchedule(cleanId);
+        await getSchedule(cleanId, { session, signal: operation.controller.signal });
 
-      setSchedule(result);
-
+      if (!isCurrent(operation)) return;
+      setSchedule({ session, result });
       setExpandedTask(null);
 
     } catch (err) {
 
+      if (!isCurrent(operation) || err?.name === "AbortError") return;
       setSchedule(null);
-
-      setError(
-        err?.message ||
-          "Unable to load the schedule."
-      );
+      if (err.status === 401) onUnauthorized?.(session);
+      setError(planningErrorMessage(err));
 
     } finally {
 
-      setLoading(false);
+      finishRequest(operation, setLoading);
 
     }
-  }
+  }, [beginRequest, isCurrent, finishRequest, session, onUnauthorized]);
 
 
   useEffect(() => {
 
     loadProjects();
 
-  }, []);
+  }, [loadProjects]);
 
 
   useEffect(() => {
 
-    if (!routeProjectId) {
+    setSchedule(null);
+    setLoading(false);
 
-      setSchedule(null);
+    if (!routeProjectId) return;
 
-      return;
-    }
-
-    const decodedId =
-      decodeURIComponent(
-        routeProjectId
-      );
-
+    const decodedId = decodeURIComponent(routeProjectId);
     setProjectId(decodedId);
+    loadScheduleWithoutNavigation(decodedId);
 
-    loadScheduleWithoutNavigation(
-      decodedId
-    );
-
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routeProjectId]);
+  }, [routeProjectId, routeKey, loadScheduleWithoutNavigation]);
 
 
   /*
@@ -1151,6 +1177,9 @@ function Schedule() {
 
   function handleBackToProjects() {
 
+    invalidateRequests();
+    setLoading(false);
+    setProjectsLoading(false);
     setSchedule(null);
 
     setError("");
@@ -1181,6 +1210,9 @@ function Schedule() {
       return;
     }
 
+    cancelRequest("detail");
+    const operation = beginRequest("mutation");
+    if (!operation) return;
     setLoading(true);
     setError("");
     setMessage("");
@@ -1188,9 +1220,11 @@ function Schedule() {
     try {
 
       await deleteSchedule(
-        schedule.project_id
+        schedule.project_id,
+        { session, signal: operation.controller.signal }
       );
 
+      if (!isCurrent(operation)) return;
       setSchedule(null);
 
       setMessage(
@@ -1199,18 +1233,18 @@ function Schedule() {
 
       await loadProjects();
 
+      if (!isCurrent(operation)) return;
       navigate("/schedule");
 
     } catch (err) {
 
-      setError(
-        err?.message ||
-          "Unable to delete the schedule."
-      );
+      if (!isCurrent(operation) || err?.name === "AbortError") return;
+      if (err.status === 401) onUnauthorized?.(session);
+      setError(planningErrorMessage(err));
 
     } finally {
 
-      setLoading(false);
+      finishRequest(operation, setLoading);
 
     }
   }
@@ -1238,6 +1272,9 @@ function Schedule() {
       return;
     }
 
+    cancelRequest("detail");
+    const operation = beginRequest("mutation");
+    if (!operation) return;
     setLoading(true);
     setError("");
     setMessage("");
@@ -1303,10 +1340,12 @@ function Schedule() {
             resources: [],
             risks: [],
             use_llm: false,
-          }
+          },
+          { session, signal: operation.controller.signal }
         );
 
-      setSchedule(updated);
+      if (!isCurrent(operation)) return;
+      setSchedule({ session, result: updated });
 
       setMessage(
         "Schedule recalculated from its current tasks."
@@ -1316,14 +1355,15 @@ function Schedule() {
 
     } catch (err) {
 
-      setError(
-        err?.message ||
-          "Unable to recalculate the schedule."
-      );
+      if (!isCurrent(operation) || err?.name === "AbortError") return;
+      // A failed/ambiguous update cannot establish that the stored plan is current.
+      setSchedule(null);
+      if (err.status === 401) onUnauthorized?.(session);
+      setError(planningErrorMessage(err));
 
     } finally {
 
-      setLoading(false);
+      finishRequest(operation, setLoading);
 
     }
   }
@@ -1440,6 +1480,13 @@ function Schedule() {
 
 
             <div className="schedule-actions">
+
+              <Link
+                to={`/monitoring/${encodeURIComponent(schedule.project_id)}`}
+                className="secondary-button"
+              >
+                Monitor progress
+              </Link>
 
               <button
                 type="button"

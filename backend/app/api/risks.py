@@ -204,6 +204,7 @@ async def upload_document(
 @router.post("/knowledge/search")
 async def search_knowledge(
     request: ProjectKnowledgeSearchRequest,
+    admin: dict = Depends(require_admin),
 ):
     """
     Search project knowledge using the existing Risk Agent.

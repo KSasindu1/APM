@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Annotated
 
-from pydantic import field_validator
+from pydantic import Field, StringConstraints, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,20 +15,20 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------
 
     supabase_url: str = ""
-    supabase_secret_key: str = ""
+    supabase_secret_key: str = Field(default="", repr=False)
 
     # ---------------------------------------------------------
     # Groq AI
     # ---------------------------------------------------------
 
-    groq_api_key: str | None = None
+    groq_api_key: str | None = Field(default=None, repr=False)
     groq_model: str = "openai/gpt-oss-120b"
 
     # ---------------------------------------------------------
     # Planning & Scheduling Agent
     # ---------------------------------------------------------
 
-    planning_api_key: str | None = None
+    planning_api_key: str | None = Field(default=None, repr=False)
 
     # ---------------------------------------------------------
     # Risk & Knowledge Agent
@@ -47,7 +48,7 @@ class Settings(BaseSettings):
     # PostgreSQL
     # ---------------------------------------------------------
 
-    postgres_database_url: str | None = None
+    postgres_database_url: str | None = Field(default=None, repr=False)
     postgres_search_limit: int = 20
 
     # ---------------------------------------------------------
@@ -56,7 +57,7 @@ class Settings(BaseSettings):
 
     upload_directory: str = "data/documents"
     max_upload_size_mb: int = 10
-    
+
     # ---------------------------------------------------------
     # Planning Agent callback
     # ---------------------------------------------------------
@@ -65,11 +66,27 @@ class Settings(BaseSettings):
         "http://127.0.0.1:8000/api/planning/risk-results"
     )
 
-    admin_username: str = "admin"
-    admin_password: str = "#&thvtksep26"
+    # ---------------------------------------------------------
+    # Admin Authentication
+    # ---------------------------------------------------------
 
-    jwt_secret_key: str = ""
+    admin_username: str = "admin"
+    # Passwords and signing material are exact values, not whitespace-normalized.
+    admin_password: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(
+        default="#&thvtksep26", repr=False
+    )
+    admin_password_hash: Annotated[
+        str | None, StringConstraints(strip_whitespace=False)
+    ] = Field(default=None, repr=False)
+
+
+    jwt_secret_key: Annotated[str, StringConstraints(strip_whitespace=False)] = Field(
+        default="", repr=False
+    )
     jwt_algorithm: str = "HS256"
+    jwt_issuer: str = "apm"
+    jwt_audience: str = "apm-admin"
+    account_jwt_audience: str = "apm-accounts"
     access_token_expire_minutes: int = 60
 
     # ---------------------------------------------------------
@@ -105,6 +122,7 @@ class Settings(BaseSettings):
         extra="ignore",
         enable_decoding=False,
         str_strip_whitespace=True,
+        hide_input_in_errors=True,
     )
 
 

@@ -1,12 +1,14 @@
 """Offline monitoring behavior and project-scoped authorization tests."""
 
+import asyncio
+import json
 from copy import deepcopy
 from datetime import date
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
 from app.agents.monitoring.agent import (
     MonitoringAccessDenied,
@@ -18,16 +20,23 @@ from app.agents.monitoring.providers import (
     ActualProgressProvider,
     PlanningAgentAPIProvider,
     PlanningMessageProvider,
+    RiskAgentAPIError,
+    RiskAgentAvailabilityError,
+    RiskAgentIntegrityError,
 )
 from app.agents.monitoring.schemas import (
     ActualProjectSnapshot,
+    MonitoringCoverage,
     MonitoringPrincipal,
+    MonitoringReport,
     MonitoringRequest,
     MonitoringSettings,
+    PlannedTask,
     PlanningSnapshot,
     RiskSnapshot,
     SummaryFact,
     SummarySelection,
+    TaskAssessment,
 )
 
 from .conftest import FixtureProviders
@@ -233,6 +242,8 @@ async def test_optional_actual_provider_preserves_unknown_completion(as_of, dead
         "dependency_delayed": False, "start_delay_days": 0,
         "planned_deadline_passed": deadline_passed,
         "actual_is_stale": False, "last_observed_progress": None,
+        "is_critical": False, "planned_start": date(2026, 9, 1), "due_date": date(2026, 9, 20),
+        "actual_start": None, "completed_on": None, "last_updated_on": None,
     }
     assert report.milestones[0].progress is None
     assert report.milestones[0].status == "At Risk"
@@ -793,9 +804,9 @@ async def test_summarizer_cannot_mutate_verified_facts_or_fallback(outcome):
     assert not any("untrusted:injected" in fact.source_refs for fact in report.facts)
     if outcome == "valid":
         assert report.summary_method == "llm_extractive"
-        assert report.summary_fact_ids == ["status", "progress"]
+        assert report.summary_fact_ids == ["status", "progress", "risk_coverage"]
         by_id = {fact.fact_id: fact for fact in baseline.facts}
-        assert report.summary.endswith(by_id["status"].text + " " + by_id["progress"].text)
+        assert report.summary.endswith(" ".join(by_id[fact_id].text for fact_id in report.summary_fact_ids))
     else:
         assert report.summary_method == "deterministic_extractive"
         assert report.summary_fact_ids == baseline.summary_fact_ids
@@ -804,3 +815,484 @@ async def test_summarizer_cannot_mutate_verified_facts_or_fallback(outcome):
     selector.received_facts[0].text = "UNVERIFIED later mutation"
     selector.received_facts[0].source_refs.clear()
     assert report.facts == baseline.facts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("priority", ["low", "medium", "high", "critical"])
+@pytest.mark.parametrize("critical", [False, True])
+async def test_fresh_overdue_critical_tasks_are_delayed_independently_of_priority(priority, critical):
+    sample = FixtureProviders()
+    sample.planning.milestones = []
+    sample.planning.tasks[0].priority = priority
+    sample.planning.tasks[0].is_critical = critical
+    sample.actual.tasks[0].progress = 80
+    settings = MonitoringSettings(delayed_variance=100)
+    report = await MonitoringAgent(sample, sample, settings=settings).generate(request("2026-09-21"), PRINCIPAL)
+    severe = critical or priority in ("high", "critical")
+    assert report.status == ("DELAYED" if severe else "AT_RISK")
+    assert report.tasks[0].is_critical is critical
+    assert report.tasks[0].overdue_days == 1
+    assert sample.planning.tasks[0].priority == priority
+    warning = next(w for w in report.warnings if w.code == "OVERDUE_TASK")
+    assert warning.severity == ("critical" if severe else "warning")
+
+
+@pytest.mark.asyncio
+async def test_critical_path_does_not_turn_stale_or_missing_progress_into_overdue():
+    sample = FixtureProviders()
+    sample.planning.milestones = []
+    sample.planning.tasks[0].priority = "low"
+    sample.planning.tasks[0].due_date = date(2026, 9, 15)
+    sample.planning.context = {"analysis": {"critical_path": ["T001"]}}
+    sample.actual.tasks[0].updated_on = date(2026, 9, 10)
+    for actual in (sample, None):
+        report = await MonitoringAgent(sample, actual).generate(request(), PRINCIPAL)
+        assert report.tasks[0].is_critical
+        assert report.status == "AT_RISK"
+        assert report.tasks[0].actual_progress is report.tasks[0].variance is None
+        assert report.tasks[0].overdue_days == 0
+        assert not any(w.code == "OVERDUE_TASK" for w in report.warnings)
+
+
+@pytest.mark.asyncio
+async def test_assessment_exposes_supplied_dates_without_forecasts():
+    sample = FixtureProviders()
+    sample.actual.tasks[0].actual_start = date(2026, 9, 2)
+    report = await MonitoringAgent(sample, sample).generate(request(), PRINCIPAL)
+    task = report.tasks[0]
+    assert task.planned_start == date(2026, 9, 1)
+    assert task.due_date == date(2026, 9, 20)
+    assert task.actual_start == date(2026, 9, 2)
+    assert task.completed_on is None
+    assert task.last_updated_on == date(2026, 9, 18)
+    sample.actual.tasks[0].status = "completed"
+    sample.actual.tasks[0].progress = 100
+    sample.actual.tasks[0].completed_on = date(2026, 9, 17)
+    completed = await MonitoringAgent(sample, sample).generate(request(), PRINCIPAL)
+    assert completed.tasks[0].completed_on == date(2026, 9, 17)
+
+
+@pytest.mark.asyncio
+async def test_coverage_exact_contract_and_full_report_persisted_before_publish():
+    sample = FixtureProviders()
+    sample.planning.fetched_on = date(2026, 9, 18)
+    sample.actual.observed_on = date(2026, 9, 18)
+    sample.risk.observed_on = date(2026, 9, 18)
+    repository = Mock(spec=["save"], save=AsyncMock())
+    coordinator = Mock(spec=["publish"], publish=AsyncMock())
+    report = await MonitoringAgent(sample, sample, sample, repository=repository, coordinator=coordinator).generate(
+        request(), PRINCIPAL)
+    assert report.coverage is not None
+    assert report.coverage.model_dump(mode="json") == {
+        "planning_status": "available", "planning_freshness": "known", "actual_status": "complete",
+        "risk_status": "available", "milestones_status": "available", "total_tasks": 1,
+        "fresh_actual_tasks": 1, "missing_actual_tasks": 0, "stale_actual_tasks": 0,
+        "planning_updated_on": "2026-09-18", "planning_observed_on": "2026-09-18",
+        "actual_updated_on": "2026-09-18", "actual_observed_on": "2026-09-18",
+        "risk_observed_on": "2026-09-18", "expected_progress_method": "supplied_target",
+        "actual_progress_method": "unweighted_task_average",
+    }
+    repository.save.assert_awaited_once_with(report, PRINCIPAL)
+    assert coordinator.publish.await_args.args[0].report.coverage == report.coverage
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("states,status,counts", [
+    (["fresh", "fresh"], "complete", (2, 0, 0)),
+    (["fresh", "missing"], "partial", (1, 1, 0)),
+    (["fresh", "stale"], "partial", (1, 0, 1)),
+    (["stale", "stale"], "stale", (0, 0, 2)),
+    (["stale", "missing"], "stale", (0, 1, 1)),
+    (["missing", "missing"], "missing", (0, 2, 0)),
+    (["completed", "fresh"], "complete", (2, 0, 0)),
+])
+async def test_actual_coverage_counts_use_individual_measurements(states, status, counts):
+    sample = FixtureProviders()
+    sample.planning.tasks.append(sample.planning.tasks[0].model_copy(update={"task_id": "T002"}))
+    records = []
+    for index, state in enumerate(states, 1):
+        if state == "missing":
+            continue
+        record = {"task_id": f"T00{index}", "status": "in_progress", "progress": 80,
+                  "updated_on": "2026-09-10" if state in ("stale", "completed") else "2026-09-18"}
+        if state == "completed":
+            record.update(status="completed", progress=100, completed_on="2026-09-10")
+        records.append(record)
+    sample.actual = ActualProjectSnapshot.model_validate({
+        "project_id": "P001", "updated_on": "2026-09-18", "tasks": records,
+    })
+    report = await MonitoringAgent(sample, sample).generate(request(), PRINCIPAL)
+    assert report.coverage is not None
+    assert report.coverage.actual_status == status
+    assert (report.coverage.fresh_actual_tasks, report.coverage.missing_actual_tasks,
+            report.coverage.stale_actual_tasks) == counts
+    assert report.coverage.total_tasks == sum(counts) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("updated_on,freshness", [(None, "unknown"), ("2026-09-11", "known"), ("2026-09-10", "stale")])
+@pytest.mark.parametrize("targets,method", [([80], "supplied_target"), ([None], "calendar_estimate"),
+                                         ([80, None], "mixed"), ([], "unavailable")])
+async def test_coverage_planning_freshness_and_expected_method(updated_on, freshness, targets, method):
+    sample = FixtureProviders()
+    sample.planning = PlanningSnapshot.model_validate({
+        "project_id": "P001", "updated_on": updated_on,
+        "tasks": [{"task_id": f"T00{index}", "title": "Planned work", "start_date": "2026-09-01",
+                   "due_date": "2026-09-20", "expected_progress": target}
+                  for index, target in enumerate(targets, 1)],
+    })
+    report = await MonitoringAgent(sample).generate(request(), PRINCIPAL)
+    assert report.coverage is not None
+    assert report.coverage.planning_freshness == freshness
+    assert report.coverage.expected_progress_method == method
+    assert report.coverage.actual_status == "missing"
+    assert report.coverage.milestones_status == "not_supplied"
+    assert report.coverage.actual_updated_on is report.coverage.actual_observed_on is None
+    assert report.metrics.actual_progress is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_risk_coverage_is_distinct_from_available_zero_risks():
+    sample = FixtureProviders()
+    sample.actual.tasks[0].progress = 80
+    sample.risk.risks = []
+    settings = MonitoringSettings(deadline_approaching_days=1)
+    unknown = await MonitoringAgent(sample, sample, settings=settings).generate(request(), PRINCIPAL)
+    known = await MonitoringAgent(sample, sample, sample, settings=settings).generate(request(), PRINCIPAL)
+    assert unknown.coverage is not None and known.coverage is not None
+    assert unknown.metrics.high_risks == known.metrics.high_risks == 0
+    assert unknown.coverage.risk_status == "not_supplied"
+    assert known.coverage.risk_status == "available"
+    assert "risk coverage is unknown" in unknown.summary
+    assert "zero risk count does not establish no risks" in unknown.summary
+    assert "0 open high/critical risk(s) were supplied" in known.summary
+    assert "risk coverage is unknown" not in known.summary
+    assert unknown.status == known.status == "ON_TRACK"
+
+
+@pytest.mark.asyncio
+async def test_stale_risk_snapshot_does_not_assert_current_zero_risks():
+    sample = FixtureProviders()
+    sample.actual.tasks[0].progress = 80
+    sample.risk.risks = []
+    sample.risk.updated_on = date(2026, 9, 10)
+    report = await MonitoringAgent(sample, sample, sample, settings=MonitoringSettings(deadline_approaching_days=1)).generate(
+        request(), PRINCIPAL)
+    assert report.coverage is not None
+    assert report.coverage.risk_status == "stale"
+    assert report.coverage.risk_observed_on is None
+    assert report.status == "AT_RISK"
+    assert any(w.code == "STALE_RISK" for w in report.warnings)
+    assert "risk coverage is unknown (risk snapshot is stale)" in report.summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["api_error", "timeout", "http_timeout"])
+@pytest.mark.parametrize("policy", ["fail", "report_unknown"])
+async def test_risk_failure_policy_preserves_default_fail_and_optional_unknown(failure, policy):
+    sample = FixtureProviders()
+    sample.actual.tasks[0].progress = 80
+    risk = Mock(spec=["get_risks"], get_risks=AsyncMock())
+    error = {"api_error": RiskAgentAvailabilityError("Sensitive synthetic error must not appear in reports"),
+             "timeout": TimeoutError(),
+             "http_timeout": httpx.ReadTimeout("Sensitive synthetic timeout must not appear in reports")}[failure]
+    risk.get_risks.side_effect = error
+    repository = Mock(spec=["save"], save=AsyncMock())
+    coordinator = Mock(spec=["publish"], publish=AsyncMock())
+    settings = MonitoringSettings(risk_failure_policy=policy, deadline_approaching_days=1)
+    agent = MonitoringAgent(sample, sample, risk, settings=settings, repository=repository, coordinator=coordinator)
+    if policy == "fail":
+        with pytest.raises(type(error)) as raised:
+            await agent.generate(request(), PRINCIPAL)
+        assert raised.value is error
+        repository.save.assert_not_awaited()
+        coordinator.publish.assert_not_awaited()
+    else:
+        report = await agent.generate(request(), PRINCIPAL)
+        assert report.status == "AT_RISK"
+        assert report.coverage is not None
+        assert report.coverage.risk_status == "unavailable"
+        assert report.coverage.risk_observed_on is None
+        assert report.risks == [] and report.risk_summary == ""
+        assert report.metrics.high_risks == 0
+        assert any(w.code == "RISK_UNAVAILABLE" for w in report.warnings)
+        assert "Risk Agent unavailable" in report.summary
+        assert any("risks are unknown" in item for item in report.limitations)
+        assert "Sensitive synthetic" not in report.model_dump_json()
+        repository.save.assert_awaited_once_with(report, PRINCIPAL)
+        coordinator.publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_risk_failure_does_not_downgrade_independently_observed_delay():
+    sample = FixtureProviders()
+    risk = Mock(spec=["get_risks"], get_risks=AsyncMock(side_effect=RiskAgentAvailabilityError("Risk unavailable")))
+    report = await MonitoringAgent(sample, sample, risk, settings=MonitoringSettings(
+        risk_failure_policy="report_unknown")).generate(request(), PRINCIPAL)
+    assert report.coverage is not None and report.coverage.risk_status == "unavailable"
+    assert report.status == "DELAYED"
+    assert any(w.code == "RISK_UNAVAILABLE" for w in report.warnings)
+
+
+@pytest.mark.asyncio
+async def test_risk_wait_for_timeout_reports_unknown_without_fake_snapshot():
+    sample = FixtureProviders()
+    sample.actual.tasks[0].progress = 80
+
+    class SlowRisk:
+        async def get_risks(self, project_id):
+            await asyncio.sleep(1)
+            pytest.fail("The provider must be cancelled before returning a snapshot")
+
+    report = await MonitoringAgent(sample, sample, SlowRisk(), settings=MonitoringSettings(
+        risk_failure_policy="report_unknown", provider_timeout_seconds=0.02, deadline_approaching_days=1,
+    )).generate(request(), PRINCIPAL)
+    assert report.coverage is not None
+    assert report.coverage.risk_status == "unavailable"
+    assert report.status == "AT_RISK"
+    assert report.risks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("contextual", [False, True])
+@pytest.mark.parametrize("invalid", ["plan_project", "actual_project", "unknown_task", "plan_date", "plan_observation",
+                                    "actual_date", "actual_observation", "actual_task", "analysis"])
+async def test_invalid_inputs_never_reach_risk(contextual, invalid):
+    sample = FixtureProviders()
+    if invalid == "plan_project":
+        sample.planning.project_id = "P002"
+    elif invalid == "actual_project":
+        sample.actual.project_id = "P002"
+    elif invalid == "unknown_task":
+        sample.actual.tasks[0].task_id = "UNKNOWN"
+    elif invalid == "plan_date":
+        sample.planning.updated_on = date(2026, 9, 19)
+    elif invalid == "plan_observation":
+        sample.planning.fetched_on = date(2026, 9, 19)
+    elif invalid == "actual_date":
+        sample.actual.updated_on = date(2026, 9, 19)
+    elif invalid == "actual_observation":
+        sample.actual.observed_on = date(2026, 9, 19)
+    elif invalid == "actual_task":
+        sample.actual.tasks[0].progress = 101
+    else:
+        sample.planning.context = {"analysis": {"deadline_met": "false"}}
+    risk = Mock(spec=["get_risks", "get_risks_for_monitoring"] if contextual else ["get_risks"],
+                get_risks=AsyncMock())
+    if contextual:
+        risk.get_risks_for_monitoring = AsyncMock()
+    agent = MonitoringAgent(sample, sample, risk, settings=MonitoringSettings(risk_failure_policy="report_unknown"))
+    with pytest.raises(ValueError):
+        await agent.generate(request(), PRINCIPAL)
+    risk.get_risks.assert_not_awaited()
+    if contextual:
+        risk.get_risks_for_monitoring.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["planning", "actual"])
+@pytest.mark.parametrize("policy", ["fail", "report_unknown"])
+async def test_planning_and_actual_source_failure_is_never_downgraded_to_risk_unknown(source, policy):
+    sample = FixtureProviders()
+    broken = Mock(spec=["get_plan", "get_actual"], get_plan=AsyncMock(), get_actual=AsyncMock())
+    broken.get_plan.side_effect = broken.get_actual.side_effect = ValueError("Source unavailable")
+    risk = Mock(spec=["get_risks"], get_risks=AsyncMock())
+    agent = MonitoringAgent(broken if source == "planning" else sample,
+                            broken if source == "actual" else sample, risk,
+                            settings=MonitoringSettings(risk_failure_policy=policy))
+    with pytest.raises(ValueError, match="Source unavailable"):
+        await agent.generate(request(), PRINCIPAL)
+    risk.get_risks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invalid_risk_snapshot_is_not_hidden_by_failure_policy():
+    sample = FixtureProviders()
+    sample.risk.risks[0].task_ids = ["UNKNOWN"]
+    with pytest.raises(ValueError, match="unknown tasks"):
+        await MonitoringAgent(sample, sample, sample, settings=MonitoringSettings(
+            risk_failure_policy="report_unknown")).generate(request(), PRINCIPAL)
+
+
+@pytest.mark.asyncio
+async def test_context_is_bounded_including_configured_information_and_never_truncated():
+    sample = FixtureProviders()
+    risk = Mock(spec=["get_risks", "get_risks_for_monitoring", "project_information"],
+                get_risks=AsyncMock(), get_risks_for_monitoring=AsyncMock())
+    risk.project_information = "Original project description"
+    risk.get_risks_for_monitoring.return_value = None
+    await MonitoringAgent(sample, sample, risk).generate(request(), PRINCIPAL)
+    information = risk.get_risks_for_monitoring.await_args.args[1]
+    limit = len(information)
+    assert 1000 <= limit < 100000
+    risk.reset_mock()
+    settings = MonitoringSettings(risk_context_max_chars=limit)
+    await MonitoringAgent(sample, sample, risk, settings=settings).generate(request(), PRINCIPAL)
+    assert risk.get_risks_for_monitoring.await_args.args[1] == information
+    risk.reset_mock()
+    settings.risk_context_max_chars = limit - 1
+    with pytest.raises(ValueError, match="exceeds risk_context_max_chars"):
+        await MonitoringAgent(sample, sample, risk, settings=settings).generate(request(), PRINCIPAL)
+    risk.get_risks_for_monitoring.assert_not_awaited()
+    risk.get_risks.assert_not_awaited()
+    risk.project_information = "Large configured description " * 10000
+    with pytest.raises(ValueError, match="exceeds risk_context_max_chars"):
+        await MonitoringAgent(sample, sample, risk).generate(request(), PRINCIPAL)
+    risk.get_risks_for_monitoring.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_risk_context_and_reports_omit_credentials_without_mutating_sources():
+    sample = FixtureProviders()
+    sample.planning.context = {
+        "project_name": "Safe baseline", "api_key": "secret-source-key",
+        "nested": {"access_token": "secret-source-token", "description": "Safe source description"},
+    }
+    sample.actual.context = {"credentials": {"password": "secret-source-password"}, "source": "actual-input"}
+    originals = deepcopy((sample.planning.context, sample.actual.context))
+    sample.actual.tasks[0].updated_on = date(2026, 9, 10)
+    risk = Mock(spec=["get_risks_for_monitoring", "get_risks"],
+                get_risks=AsyncMock(), get_risks_for_monitoring=AsyncMock())
+    risk.get_risks_for_monitoring.return_value = None
+    repository, coordinator = AsyncMock(), AsyncMock()
+    report = await MonitoringAgent(sample, sample, risk, repository=repository,
+                                   coordinator=coordinator).generate(request(), PRINCIPAL)
+    information = risk.get_risks_for_monitoring.await_args.args[1]
+    context = json.loads(information)
+    assert "secret-source" not in information
+    assert context["planned_baseline"]["context"]["nested"]["description"] == "Safe source description"
+    assert context["observed_actual_measurements"]["tasks"][0]["progress"] == 50
+    assert context["measurement_freshness"]["T001"] == {"actual_is_stale": True, "current_progress": None}
+    assert report.planning_context == {
+        "project_name": "Safe baseline", "nested": {"description": "Safe source description"},
+    }
+    assert report.actual_context == {"source": "actual-input"}
+    assert "secret-source" not in report.model_dump_json()
+    assert repository.save.await_args.args[0].planning_context == report.planning_context
+    assert "secret-source" not in coordinator.publish.await_args.args[0].model_dump_json()
+    assert (sample.planning.context, sample.actual.context) == originals
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", [
+    "accessToken", "clientSecret", "APIKey", "X-API-Key", "session.access_token",
+    " refresh-token ", "privateKey", "awsAccessKeyId", "Cookie", "Proxy-Authorization",
+    "serviceCredentials", "ACCESS_TOKEN", "clientSECRET", "access_token", "serverKey", "signingKey",
+])
+async def test_risk_context_filters_nested_and_serialized_credentials_without_losing_evidence(field: str):
+    sample = FixtureProviders()
+    marker = "synthetic-sensitive-field"
+    evidence: dict[str, JsonValue] = {"description": "Vendor review is pending", "document_id": "review-1"}
+    record: dict[str, JsonValue] = {field: marker, **evidence}
+    sample.planning.context = {
+        field: marker, "nested": [record], "serialized": json.dumps({"records": [record]}),
+        "serialized_evidence": '{ "document_id": "review-1", "page": 3 }',
+        "key_findings": ["Vendor review is pending"],
+    }
+    sample.actual.context = {"source_payload": {"records": [record]}}
+    originals = deepcopy((sample.planning.context, sample.actual.context))
+
+    configured = json.dumps(json.dumps(record))
+    risk = Mock(spec=["get_risks_for_monitoring", "get_risks", "project_information"],
+                get_risks_for_monitoring=AsyncMock(return_value=None), get_risks=AsyncMock())
+    risk.project_information = configured
+    report = await MonitoringAgent(sample, sample, risk).generate(request(), PRINCIPAL)
+    information = risk.get_risks_for_monitoring.await_args.args[1]
+    context = json.loads(information)
+    baseline = context["planned_baseline"]["context"]
+    assert marker not in information
+    assert baseline["nested"] == [evidence]
+    assert json.loads(baseline["serialized"]) == {"records": [evidence]}
+    assert baseline["serialized_evidence"] == originals[0]["serialized_evidence"]
+    assert baseline["key_findings"] == ["Vendor review is pending"]
+    assert context["observed_actual_measurements"]["context"]["source_payload"]["records"] == [evidence]
+    assert json.loads(json.loads(context["configured_project_information"])) == evidence
+    assert report.planning_context == baseline
+    assert report.actual_context == context["observed_actual_measurements"]["context"]
+    assert marker not in report.model_dump_json()
+    assert (sample.planning.context, sample.actual.context) == originals
+    assert risk.project_information == configured
+    risk.get_risks.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [RiskAgentAPIError, RiskAgentIntegrityError])
+@pytest.mark.parametrize("contextual", [False, True])
+async def test_degraded_policy_does_not_catch_integrity_or_unclassified_errors(error_type, contextual):
+    sample = FixtureProviders()
+    failure = error_type("Synthetic integrity failure")
+    risk = Mock(spec=["get_risks_for_monitoring"] if contextual else ["get_risks"])
+    method = AsyncMock(side_effect=failure)
+    setattr(risk, "get_risks_for_monitoring" if contextual else "get_risks", method)
+    repository = Mock(spec=["save"], save=AsyncMock())
+    coordinator = Mock(spec=["publish"], publish=AsyncMock())
+    with pytest.raises(error_type) as captured:
+        await MonitoringAgent(sample, sample, risk, repository=repository, coordinator=coordinator,
+                              settings=MonitoringSettings(risk_failure_policy="report_unknown")).generate(
+            request(), PRINCIPAL)
+    assert captured.value is failure
+    method.assert_awaited_once()
+    repository.save.assert_not_awaited()
+    coordinator.publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_risk_fact_cannot_be_omitted_by_optional_selector():
+    sample = FixtureProviders()
+    selector = Mock(spec=["select_facts"], select_facts=AsyncMock())
+    selector.select_facts.return_value = SummarySelection(fact_ids=["status"])
+    risk = Mock(spec=["get_risks"], get_risks=AsyncMock())
+    risk.get_risks.side_effect = RiskAgentAvailabilityError("Risk failed")
+    report = await MonitoringAgent(sample, sample, risk, summarizer=selector, settings=MonitoringSettings(
+        risk_failure_policy="report_unknown")).generate(request(), PRINCIPAL)
+    assert report.summary_fact_ids == ["status", "risk_coverage"]
+    assert "Current risk coverage is unknown (Risk Agent unavailable)" in report.summary
+
+
+@pytest.mark.asyncio
+async def test_legacy_report_has_no_invented_coverage_or_task_date_basis():
+    sample = FixtureProviders()
+    report = await MonitoringAgent(sample, sample).generate(request(), PRINCIPAL)
+    payload = report.model_dump(mode="json")
+    del payload["coverage"]
+    del payload["actual_context"]
+    for task in payload["tasks"]:
+        for name in ("is_critical", "planned_start", "due_date", "actual_start", "completed_on", "last_updated_on"):
+            del task[name]
+    legacy = MonitoringReport.model_validate(payload)
+    assert legacy.coverage is None
+    assert legacy.actual_context == {}
+    assert not legacy.tasks[0].is_critical
+    assert legacy.tasks[0].planned_start is legacy.tasks[0].due_date is legacy.tasks[0].last_updated_on is None
+    assert legacy.model_dump(mode="json")["coverage"] is None
+
+
+def test_additive_model_and_setting_defaults():
+    sample = FixtureProviders()
+    task = PlannedTask.model_validate(sample.planning.tasks[0].model_dump(exclude={"is_critical"}))
+    assert task.is_critical is False
+    assessment = TaskAssessment(task_id="T001", title="Work", status="missing", actual_progress=None,
+                                expected_progress=0, variance=None, overdue_days=0, completed_late_days=0)
+    assert not assessment.is_critical
+    assert all(getattr(assessment, name) is None for name in
+               ("planned_start", "due_date", "actual_start", "completed_on", "last_updated_on"))
+    settings = MonitoringSettings()
+    assert settings.risk_failure_policy == "fail"
+    assert settings.risk_context_max_chars == 100000
+
+
+@pytest.mark.parametrize("setting,value", [("risk_failure_policy", "ignore"), ("risk_context_max_chars", 999),
+                                          ("risk_context_max_chars", 1000001), ("risk_context_max_chars", True)])
+def test_invalid_risk_settings_are_rejected(setting, value):
+    with pytest.raises(ValidationError):
+        MonitoringSettings.model_validate({setting: value})
+
+
+@pytest.mark.parametrize("name", ["total_tasks", "fresh_actual_tasks", "missing_actual_tasks", "stale_actual_tasks"])
+def test_coverage_counts_cannot_be_negative(name):
+    payload = {"planning_freshness": "unknown", "actual_status": "missing", "risk_status": "not_supplied",
+               "milestones_status": "not_supplied", "total_tasks": 0, "fresh_actual_tasks": 0,
+               "missing_actual_tasks": 0, "stale_actual_tasks": 0, "expected_progress_method": "unavailable"}
+    payload[name] = -1
+    with pytest.raises(ValidationError):
+        MonitoringCoverage.model_validate(payload)

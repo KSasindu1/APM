@@ -4,6 +4,7 @@ import hashlib
 import json
 from copy import deepcopy
 from datetime import date
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -15,6 +16,8 @@ from app.agents.monitoring.providers import (
     PlanningAgentAPIProvider,
     PlanningMessageProvider,
     RiskAgentAPIError,
+    RiskAgentAvailabilityError,
+    RiskAgentIntegrityError,
     RiskAgentAPIProvider,
     adapt_actual_progress,
 )
@@ -118,7 +121,7 @@ async def test_exact_post_contract_and_full_snapshot(api_payload, options, infor
     )
     expected_id = "risk-api-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
     assert snapshot.model_dump() == {
-        "project_id": "P001", "updated_on": TODAY,
+        "project_id": "P001", "updated_on": TODAY, "observed_on": TODAY,
         "risks": [{
             "risk_id": expected_id, "risk": item["risk"],
             "description": item["description"], "level": "high", "status": "open",
@@ -202,12 +205,12 @@ async def test_mismatched_project_is_rejected(api_payload):
         base_url=BASE_URL,
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json=api_payload)),
     ) as client:
-        with pytest.raises(RiskAgentAPIError, match="project_id does not match"):
+        with pytest.raises(RiskAgentIntegrityError, match="project_id does not match"):
             await RiskAgentAPIProvider(client, today=lambda: TODAY).get_risks("P001")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500, 503])
+@pytest.mark.parametrize("status", [302, 400, 401, 403, 404, 408, 422, 429, 500, 502, 503])
 async def test_http_errors_are_wrapped(status):
     async with httpx.AsyncClient(
         base_url=BASE_URL,
@@ -216,19 +219,33 @@ async def test_http_errors_are_wrapped(status):
         with pytest.raises(RiskAgentAPIError, match=f"HTTP {status}") as error:
             await RiskAgentAPIProvider(client, today=lambda: TODAY).get_risks("P001")
     assert isinstance(error.value.__cause__, httpx.HTTPStatusError)
+    expected = RiskAgentAvailabilityError if status in (408, 429) or status >= 500 else RiskAgentIntegrityError
+    assert type(error.value) is expected
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exception", [httpx.ConnectError, httpx.ReadError,
-                                       httpx.ConnectTimeout, httpx.ReadTimeout])
+                                       httpx.ConnectTimeout, httpx.ReadTimeout,
+                                       httpx.RemoteProtocolError, httpx.ProxyError])
 async def test_network_and_timeout_errors_are_wrapped(exception):
     def handler(request):
         raise exception("Simulated transport failure", request=request)
 
     async with httpx.AsyncClient(base_url=BASE_URL, transport=httpx.MockTransport(handler)) as client:
-        with pytest.raises(RiskAgentAPIError, match="request failed or timed out") as error:
+        with pytest.raises(RiskAgentAvailabilityError, match="request failed or timed out") as error:
             await RiskAgentAPIProvider(client, today=lambda: TODAY).get_risks("P001")
     assert isinstance(error.value.__cause__, exception)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exception", [httpx.LocalProtocolError, httpx.UnsupportedProtocol])
+async def test_local_protocol_failures_are_not_classified_as_risk_unavailability(exception):
+    def handler(request):
+        raise exception("Synthetic configuration failure", request=request)
+
+    async with httpx.AsyncClient(base_url=BASE_URL, transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(RiskAgentIntegrityError):
+            await RiskAgentAPIProvider(client, today=lambda: TODAY).get_risks("P001")
 
 
 @pytest.mark.asyncio
@@ -238,7 +255,7 @@ async def test_malformed_json_is_rejected(content):
         base_url=BASE_URL,
         transport=httpx.MockTransport(lambda request: httpx.Response(200, content=content)),
     ) as client:
-        with pytest.raises(RiskAgentAPIError, match="invalid JSON or an invalid response schema"):
+        with pytest.raises(RiskAgentIntegrityError, match="invalid JSON or an invalid response schema"):
             await RiskAgentAPIProvider(client, today=lambda: TODAY).get_risks("P001")
 
 
@@ -466,7 +483,7 @@ async def test_planning_exact_get_contract_and_truthful_snapshot(planning_payloa
         "tasks": [{
             "task_id": "T001", "title": "Backend Development",
             "start_date": date(2026, 10, 17), "due_date": date(2026, 10, 27),
-            "weight": 1.0, "priority": "high", "expected_progress": None,
+            "weight": 1.0, "priority": "high", "is_critical": True, "expected_progress": None,
             "dependency_ids": [],
         }],
         "milestones": [], "context": planning_payload,
@@ -611,6 +628,8 @@ async def test_actual_progress_mapping_preserves_observed_values(actual_payload)
             "actual_start": date(2026, 10, 18),
         }],
         "updates": [],
+        "context": {"source_payload": actual_payload, "snapshot_date_basis": "observation",
+                    "task_date_basis": {"T001": "observation"}},
     }
     assert await ActualProgressProvider(actual_payload, observed_on=OBSERVED_ON).get_actual("P001") == snapshot
 
@@ -720,6 +739,7 @@ async def test_risk_top_k_accepts_both_contract_boundaries(api_payload, top_k):
 @pytest.mark.asyncio
 async def test_empty_planning_schedule_remains_empty(planning_payload):
     planning_payload["schedule"] = []
+    planning_payload["analysis"]["critical_path"] = []
     async with httpx.AsyncClient(
         base_url=PLANNING_BASE_URL,
         transport=httpx.MockTransport(lambda request: httpx.Response(200, json=planning_payload)),
@@ -814,7 +834,7 @@ async def test_actual_snapshot_cannot_postdate_explicit_observation(actual_paylo
 def test_absent_actual_snapshot_has_no_invented_dates():
     assert ActualProjectSnapshot(project_id="P001").model_dump() == {
         "project_id": "P001", "updated_on": None, "observed_on": None,
-        "tasks": [], "updates": [],
+        "tasks": [], "updates": [], "context": {},
     }
 
 
@@ -839,3 +859,265 @@ def test_genuinely_dated_task_preserves_older_source_dates_and_new_observation(a
     assert snapshot.observed_on == OBSERVED_ON
     assert snapshot.tasks[0].actual_start == date(2026, 10, 17)
     assert snapshot.tasks[0].progress == 40
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag,path,expected", [
+    (None, ["T001"], True), (None, [], False),
+    (False, ["T001"], False), (True, [], True),
+])
+@pytest.mark.parametrize("priority", ["LOW", "MEDIUM"])
+async def test_critical_flag_preserves_authority_without_inventing_priority(planning_payload, flag, path, expected, priority):
+    task = planning_payload["schedule"][0]
+    task["priority"] = priority
+    if flag is None:
+        del task["is_critical"]
+    else:
+        task["is_critical"] = flag
+    planning_payload["analysis"]["critical_path"] = path
+    async with httpx.AsyncClient(
+        base_url=PLANNING_BASE_URL,
+        transport=httpx.MockTransport(lambda sent: httpx.Response(200, json=planning_payload)),
+    ) as client:
+        snapshot = await PlanningAgentAPIProvider(client, today=lambda: OBSERVED_ON).get_plan("P001")
+    assert snapshot.tasks[0].is_critical is expected
+    assert snapshot.tasks[0].priority == priority.lower()
+    assert snapshot.tasks[0].expected_progress is None
+    assert snapshot.context == planning_payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [
+    ("deadline_met", "false"), ("deadline_met", "true"), ("deadline_met", 0),
+    ("deadline_met", 1), ("deadline_met", None), ("deadline_met", []),
+    ("critical_path", "T001"), ("critical_path", None), ("critical_path", ["UNKNOWN"]),
+    ("critical_path", ["T001", "T001"]), ("critical_path", [" T001 "]),
+    ("critical_path", [1]), ("critical_path", [{}]),
+])
+async def test_malformed_planning_analysis_is_rejected_without_rewriting_refs(planning_payload, field, value):
+    planning_payload["analysis"][field] = value
+    original = deepcopy(planning_payload)
+    async with httpx.AsyncClient(
+        base_url=PLANNING_BASE_URL,
+        transport=httpx.MockTransport(lambda sent: httpx.Response(200, json=planning_payload)),
+    ) as client:
+        with pytest.raises(PlanningAgentAPIError, match="invalid schedule schema"):
+            await PlanningAgentAPIProvider(client, today=lambda: OBSERVED_ON).get_plan("P001")
+    assert planning_payload == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["true", "false", 0, 1, None])
+async def test_malformed_source_critical_flag_is_not_coerced(planning_payload, value):
+    planning_payload["schedule"][0]["is_critical"] = value
+    async with httpx.AsyncClient(
+        base_url=PLANNING_BASE_URL,
+        transport=httpx.MockTransport(lambda sent: httpx.Response(200, json=planning_payload)),
+    ) as client:
+        with pytest.raises(PlanningAgentAPIError):
+            await PlanningAgentAPIProvider(client, today=lambda: OBSERVED_ON).get_plan("P001")
+
+
+@pytest.mark.asyncio
+async def test_empty_schedule_cannot_silently_discard_critical_path_refs(planning_payload):
+    planning_payload["schedule"] = []
+    async with httpx.AsyncClient(
+        base_url=PLANNING_BASE_URL,
+        transport=httpx.MockTransport(lambda sent: httpx.Response(200, json=planning_payload)),
+    ) as client:
+        with pytest.raises(PlanningAgentAPIError):
+            await PlanningAgentAPIProvider(client, today=lambda: OBSERVED_ON).get_plan("P001")
+
+
+@pytest.mark.asyncio
+async def test_planning_message_preserves_original_envelope_and_source_metadata(planning_message):
+    planning_message["transport_metadata"] = {"correlation_id": "original-correlation"}
+    original = deepcopy(planning_message)
+    provider = PlanningMessageProvider(planning_message, received_on=OBSERVED_ON)
+    planning_message["request_id"] = "later-mutation"
+    snapshot = await provider.get_plan("P001")
+    assert snapshot.context["message_source"] == {
+        "request_id": original["request_id"], "sender": original["sender"],
+        "received_on": OBSERVED_ON.isoformat(), "message": original,
+    }
+    for key, value in original["data"].items():
+        assert snapshot.context[key] == value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", ["", "Existing caller-supplied project context"])
+async def test_contextual_risk_method_keeps_endpoint_fields_and_configured_context(api_payload, configured):
+    sent_requests = []
+    context = {"project_id": "P001", "as_of": TODAY.isoformat(),
+               "planned_baseline": {"tasks": []}, "observed_actual_measurements": {"tasks": []}}
+
+    def handler(sent):
+        sent_requests.append(sent)
+        return httpx.Response(200, json=api_payload)
+
+    async with httpx.AsyncClient(base_url=BASE_URL, transport=httpx.MockTransport(handler)) as client:
+        provider = RiskAgentAPIProvider(client, project_information=configured, top_k=7, today=lambda: TODAY)
+        snapshot = await provider.get_risks_for_monitoring("P001", json.dumps(context))
+        assert provider.project_information == configured
+    assert snapshot.observed_on == TODAY
+    assert len(sent_requests) == 1
+    sent = sent_requests[0]
+    assert sent.method == "POST"
+    assert str(sent.url) == BASE_URL + "/api/risk/analyse"
+    body = json.loads(sent.content)
+    assert set(body) == {"project_id", "source_agent", "query", "project_information", "top_k"}
+    assert body["source_agent"] == "Monitoring Agent"
+    assert body["top_k"] == 7
+    expected = dict(context)
+    if configured:
+        expected["configured_project_information"] = configured
+    assert json.loads(body["project_information"]) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context", ["not JSON", "[]", "null", '{"project_id":"P002"}'])
+async def test_invalid_contextual_risk_json_is_rejected_before_http(context):
+    def unreachable(sent):
+        pytest.fail("Invalid context must not reach Risk")
+
+    async with httpx.AsyncClient(base_url=BASE_URL, transport=httpx.MockTransport(unreachable)) as client:
+        with pytest.raises(ValueError, match="project-bound JSON object"):
+            await RiskAgentAPIProvider(client).get_risks_for_monitoring("P001", context)
+
+
+@pytest.mark.asyncio
+async def test_agent_sends_validated_baseline_and_separately_labeled_measurements(api_payload, planning_message, actual_payload):
+    configured = "Retain this trusted project description"
+    planning_message["data"]["updated_on"] = "2026-10-17"
+    actual_payload["updated_on"] = "2026-10-17"
+    actual_payload["tasks"][0].update(updated_on="2026-10-17", actual_start="2026-10-17")
+    requests = []
+
+    def handler(sent):
+        requests.append(sent)
+        return httpx.Response(200, json=api_payload)
+
+    async with httpx.AsyncClient(
+        base_url=BASE_URL, headers={"Authorization": "Bearer offline-private-token", "X-API-Key": "offline-key"},
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        risk = RiskAgentAPIProvider(client, project_information=configured, today=lambda: OBSERVED_ON)
+        report = await MonitoringAgent(
+            PlanningMessageProvider(planning_message, received_on=OBSERVED_ON),
+            ActualProgressProvider(actual_payload, observed_on=OBSERVED_ON), risk,
+        ).generate(monitoring_request(OBSERVED_ON), PRINCIPAL)
+    information = json.loads(requests[0].content)["project_information"]
+    context = json.loads(information)
+    assert context["project_id"] == "P001"
+    assert context["as_of"] == OBSERVED_ON.isoformat()
+    assert context["source_dates"] == {
+        "planning_updated_on": "2026-10-17", "planning_observed_on": "2026-10-18",
+        "actual_updated_on": "2026-10-17", "actual_observed_on": "2026-10-18",
+    }
+    assert context["planned_baseline"]["tasks"][0]["is_critical"] is True
+    assert "expected_progress" not in context["planned_baseline"]["tasks"][0]
+    assert "weight" not in context["planned_baseline"]["tasks"][0]
+    assert context["planned_baseline"]["context"]["message_source"]["request_id"] == planning_message["request_id"]
+    assert context["observed_actual_measurements"]["tasks"][0]["progress"] == 40
+    assert context["configured_project_information"] == configured
+    assert "offline-private-token" not in information and "offline-key" not in information
+    assert "requested_by" not in context and "principal" not in context
+    assert report.coverage is not None
+    assert report.coverage.risk_status == "available"
+    assert report.coverage.risk_observed_on == OBSERVED_ON
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_source_update", [False, True])
+async def test_actual_coverage_preserves_source_vs_observation_date_basis(planning_message, actual_payload, has_source_update):
+    if has_source_update:
+        actual_payload["updated_on"] = "2026-10-17"
+        actual_payload["tasks"][0].update(updated_on="2026-10-17", actual_start="2026-10-17")
+    original = deepcopy(actual_payload)
+    report = await MonitoringAgent(
+        PlanningMessageProvider(planning_message, received_on=OBSERVED_ON),
+        ActualProgressProvider(actual_payload, observed_on=OBSERVED_ON),
+    ).generate(monitoring_request(OBSERVED_ON), PRINCIPAL)
+    assert report.coverage is not None
+    assert report.coverage.actual_updated_on == (date(2026, 10, 17) if has_source_update else None)
+    assert report.coverage.actual_observed_on == OBSERVED_ON
+    assert report.actual_context["source_payload"] == original
+    assert report.actual_context["snapshot_date_basis"] == ("source_update" if has_source_update else "observation")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("contextual", [False, True])
+async def test_risk_http_boundary_filters_configured_and_serialized_credentials(api_payload, contextual):
+    marker = "synthetic-sensitive-context"
+    configured = json.dumps({
+        "accessToken": marker, "description": "Preserve the vendor review",
+        "records": json.dumps([{"clientSecret": marker, "document_id": "review-1"}]),
+    })
+    context = {
+        "project_id": "P001", "transport_metadata": {"APIKey": marker, "page": 3},
+        "evidence": json.dumps({"Authorization": marker, "description": "Review pending"}),
+    }
+    original = deepcopy(context)
+    requests = []
+
+    def handler(sent):
+        requests.append(sent)
+        return httpx.Response(200, json=api_payload)
+
+    async with httpx.AsyncClient(base_url=BASE_URL, transport=httpx.MockTransport(handler)) as client:
+        provider = RiskAgentAPIProvider(client, project_information=configured, today=lambda: TODAY)
+        if contextual:
+            await provider.get_risks_for_monitoring("P001", json.dumps(context))
+        else:
+            await provider.get_risks("P001")
+        assert provider.project_information == configured
+    assert len(requests) == 1
+    body = json.loads(requests[0].content)
+    information = body["project_information"]
+    assert marker not in information
+    forwarded = json.loads(information)
+    if contextual:
+        assert forwarded["project_id"] == "P001"
+        assert forwarded["transport_metadata"] == {"page": 3}
+        assert json.loads(forwarded["evidence"]) == {"description": "Review pending"}
+        forwarded = json.loads(forwarded["configured_project_information"])
+    assert forwarded["description"] == "Preserve the vendor review"
+    assert json.loads(forwarded["records"]) == [{"document_id": "review-1"}]
+    assert context == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["fail", "report_unknown"])
+@pytest.mark.parametrize("failure", ["project", "schema", "risk_field", "duplicates", "json", "non_object", "task"])
+async def test_real_risk_adapter_integrity_failures_never_save_or_publish(api_payload, policy, failure):
+    sample = FixtureProviders()
+    if failure == "project":
+        api_payload["project_id"] = "P002"
+    elif failure == "schema":
+        del api_payload["summary"]
+    elif failure == "risk_field":
+        api_payload["risks"][0]["confidence"] = 2
+    elif failure == "duplicates":
+        api_payload["risks"].append(deepcopy(api_payload["risks"][0]))
+    elif failure == "task":
+        api_payload["risks"][0]["task_id"] = "UNKNOWN"
+    requests = []
+
+    def handler(sent):
+        requests.append(sent)
+        if failure == "json":
+            return httpx.Response(200, text="Synthetic invalid JSON")
+        return httpx.Response(200, json=[] if failure == "non_object" else api_payload)
+
+    repository = Mock(spec=["save"], save=AsyncMock())
+    coordinator = Mock(spec=["publish"], publish=AsyncMock())
+    async with httpx.AsyncClient(base_url=BASE_URL, transport=httpx.MockTransport(handler)) as client:
+        provider = RiskAgentAPIProvider(client, today=lambda: TODAY)
+        expected = ValueError if failure == "task" else RiskAgentIntegrityError
+        with pytest.raises(expected):
+            await MonitoringAgent(sample, sample, provider, repository=repository, coordinator=coordinator,
+                                  settings=MonitoringSettings(risk_failure_policy=policy)).generate(
+                monitoring_request(), PRINCIPAL)
+    assert len(requests) == 1
+    repository.save.assert_not_awaited()
+    coordinator.publish.assert_not_awaited()
