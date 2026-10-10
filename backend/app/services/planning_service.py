@@ -1,4 +1,8 @@
+
 from __future__ import annotations
+
+import logging
+from typing import Any
 
 from app.agents.planning.agent import PlanningAgent
 from app.agents.planning.tools import (
@@ -15,6 +19,10 @@ from app.model.planning import (
     ScheduleResponse,
     ScheduledTask,
 )
+from app.services.risk_agent_client import RiskAgentClient
+
+
+logger = logging.getLogger(__name__)
 
 
 CONFIDENCE_BY_SOURCE = {
@@ -48,11 +56,18 @@ class PlanningService:
     def __init__(
         self,
         agent: PlanningAgent | None = None,
+        risk_agent_client: RiskAgentClient | None = None,
     ) -> None:
 
         self.agent = (
             agent
             or PlanningAgent()
+        )
+
+        # ADDED: Risk Agent client.
+        self.risk_agent_client = (
+            risk_agent_client
+            or RiskAgentClient()
         )
 
     def create_schedule(
@@ -358,6 +373,159 @@ class PlanningService:
             analysis=analysis,
             responsible_ai=responsible_ai,
             warnings=warnings,
+        )
+
+    # =================================================
+    # ADDED: GENERATE PLAN AND REQUEST RISK ANALYSIS
+    # =================================================
+
+    async def create_schedule_with_risk(
+        self,
+        request: ProjectPlanningRequest,
+    ) -> ScheduleResponse:
+        """
+        Generate and saveable plan, then send it to the
+        Risk Agent. Risk Agent failure must not prevent
+        plan generation.
+
+        A complete revised_plan response can be accepted
+        after validation. Otherwise, the original plan
+        is returned with a warning.
+        """
+
+        # Always generate the plan first.
+        initial_schedule = self.create_schedule(request)
+
+        try:
+            risk_result = (
+                await self.risk_agent_client.send_plan(
+                    initial_schedule
+                )
+            )
+
+        except Exception as exc:
+            logger.warning(
+                "Risk Agent unavailable for project %s: %s",
+                request.project_id,
+                exc,
+            )
+
+            return self._add_risk_warning(
+                initial_schedule,
+                (
+                    "Risk Agent analysis was unavailable. "
+                    "The original plan was generated and "
+                    "returned without external risk adjustments."
+                ),
+            )
+
+        # The Risk Agent may return a complete revised plan.
+        # Validate it before accepting it.
+        revised_data = risk_result.get("revised_plan")
+
+        if isinstance(revised_data, dict):
+            try:
+                revised_plan = ScheduleResponse.model_validate(
+                    revised_data
+                )
+
+                if (
+                    revised_plan.project_id
+                    != initial_schedule.project_id
+                ):
+                    raise ValueError(
+                        "Risk Agent returned a different project ID."
+                    )
+
+                if not revised_plan.schedule:
+                    raise ValueError(
+                        "Risk Agent returned an empty schedule."
+                    )
+
+                revised_task_ids = {
+                    task.task_id
+                    for task in revised_plan.schedule
+                }
+
+                if len(revised_task_ids) != len(
+                    revised_plan.schedule
+                ):
+                    raise ValueError(
+                        "Risk Agent returned duplicate task IDs."
+                    )
+
+                original_task_ids = {
+                    task.task_id
+                    for task in initial_schedule.schedule
+                }
+
+                if revised_task_ids != original_task_ids:
+                    raise ValueError(
+                        "Risk Agent changed the task set. "
+                        "New or removed tasks require review."
+                    )
+
+                return self._add_risk_warning(
+                    revised_plan,
+                    (
+                        "The Risk Agent supplied a revised plan. "
+                        "Human review is required before execution."
+                    ),
+                )
+
+            except Exception as exc:
+                logger.warning(
+                    "Risk Agent revised plan rejected for "
+                    "project %s: %s",
+                    request.project_id,
+                    exc,
+                )
+
+                return self._add_risk_warning(
+                    initial_schedule,
+                    (
+                        "The Risk Agent response contained an "
+                        "invalid revised plan. The original "
+                        "schedule was retained."
+                    ),
+                )
+
+        # A risk assessment alone is not sufficient to safely
+        # change dates, dependencies, and critical-path data.
+        # Do not silently treat free-text advice as a schedule.
+        return self._add_risk_warning(
+            initial_schedule,
+            (
+                "Risk analysis could not be fully applied because "
+                "the Risk Agent did not return a valid revised schedule. "
+                "The original project schedule has been preserved, "
+                "and no risk-based schedule changes were applied."
+            ),
+        )
+
+    @staticmethod
+    def _add_risk_warning(
+        schedule: ScheduleResponse,
+        warning: str,
+    ) -> ScheduleResponse:
+        """Return a copy with consistent response and analysis warnings."""
+
+        warnings = list(schedule.warnings or [])
+
+        if warning not in warnings:
+            warnings.append(warning)
+
+        analysis = schedule.analysis.model_copy(
+            update={
+                "warnings": list(warnings),
+            }
+        )
+
+        return schedule.model_copy(
+            update={
+                "warnings": list(warnings),
+                "analysis": analysis,
+            }
         )
 
     @staticmethod

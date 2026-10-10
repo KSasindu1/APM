@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import logging
@@ -93,8 +94,9 @@ async def create_schedule(
 
     try:
 
-        result = (
-            planning_service.create_schedule(
+        # ADDED: Generate plan and request risk analysis.
+        result = await (
+            planning_service.create_schedule_with_risk(
                 request
             )
         )
@@ -252,8 +254,9 @@ async def update_schedule(
                 detail="Schedule not found.",
             )
 
-        result = (
-            planning_service.create_schedule(
+        # ADDED: Risk analysis on updated plans too.
+        result = await (
+            planning_service.create_schedule_with_risk(
                 request
             )
         )
@@ -374,8 +377,9 @@ async def handle_agent_message(
             **message.data
         )
 
-        result = (
-            planning_service.create_schedule(
+        # ADDED: Risk analysis for agent-to-agent requests.
+        result = await (
+            planning_service.create_schedule_with_risk(
                 request
             )
         )

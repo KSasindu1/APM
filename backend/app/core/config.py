@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     planning_api_key: str | None = None
 
     # ---------------------------------------------------------
+    # Risk & Knowledge Agent
+    # ---------------------------------------------------------
+
+    risk_agent_url: str = "http://localhost:8000"
+    risk_agent_timeout: int = 60
+
+    # ---------------------------------------------------------
     # Risk & Knowledge Retrieval Agent - ChromaDB
     # ---------------------------------------------------------
 
