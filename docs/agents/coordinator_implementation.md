@@ -1,5 +1,9 @@
 # Coordinator component
 
+## Input-only handoff
+
+The Coordinator page now extracts and reviews inputs only. **Continue to Planning** sends a `coordinatorDraft` through React Router navigation state, including project name/ID, objective and instructions, dates, supplied tasks, and resources. It does not invoke the schedule endpoint or generate AI tasks. Task-generation choices belong to the Planning page. The landing card and Planning form integration require approval because they are shared files.
+
 The Coordinator provides a structured input form, local natural-language extraction, editable resource/task lists, JSON delegation to Planning, and a deadline recommendation. Its scoped styling follows the existing Planning/Schedule palette (#2b4ea8 blue, #f6f5f2 paper, #121826 ink) and Manrope typography. No separate server or port is needed.
 
 ## Running after shared-file integration

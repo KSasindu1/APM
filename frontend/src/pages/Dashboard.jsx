@@ -83,7 +83,7 @@ function Dashboard() {
       <div className="dashboard-grid">
 
         <Link
-          to="/planning"
+          to="/coordinator"
           className="dashboard-action-card"
         >
 
@@ -92,17 +92,17 @@ function Dashboard() {
           </div>
 
           <h3>
-            Create Project Plan
+            Project Coordinator
           </h3>
 
           <p>
-            Describe your project and let the
-            Planning Agent generate tasks,
-            dependencies, dates and risks.
+            Describe your project, extract and
+            review the details, then continue to
+            Planning with your inputs prefilled.
           </p>
 
           <span>
-            Open Planning →
+            Open Coordinator →
           </span>
 
         </Link>

@@ -1,4 +1,7 @@
 /* Scoped to the Coordinator; mirrors Planning/Schedule's palette and typography. */
+.coord-summary { text-align: left; margin: 20px 0; }
+.coord-summary dt { font-size: 13px; font-weight: 800; margin-top: 18px; }
+.coord-summary dd { margin: 6px 0 0; color: #6b6f7a; font-size: 14px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .coordinator-page { --coord-ink: #121826; --coord-muted: #6b6f7a; --coord-line: #e3e1da; --coord-blue: #2b4ea8; min-height: 100vh; padding: 42px max(24px, calc((100vw - 1200px)/2)) 70px; background: #f6f5f2; color: var(--coord-ink); font-family: "Manrope", system-ui, sans-serif; }
 .coord-header { margin-bottom: 32px; max-width: 780px; }
 .coordinator-page a { color: var(--coord-blue); }

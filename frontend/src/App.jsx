@@ -17,7 +17,7 @@ const agents = [
 ];
 
 const features = [
-  { number: "01", color: "blue", title: "Smart Planning", description: "Automatically create project plans, tasks, milestones, dependencies, and schedules from natural language requirements.", path: "/planning", link: "Open Planning →" },
+  { number: "01", color: "blue", title: "Smart Planning", description: "Automatically create project plans, tasks, milestones, dependencies, and schedules from natural language requirements.", path: "/coordinator", link: "Open Coordinator →" },
   { number: "02", color: "purple", title: "Risk Detection", description: "Detect potential project risks and provide intelligent recommendations for mitigation and decision-making." },
   { number: "03", color: "green", title: "Knowledge Retrieval", description: "Retrieve relevant information from project documents, knowledge bases, and historical project data." },
   { number: "04", color: "orange", title: "Monitoring & Reports", description: "Monitor project health and automatically generate progress summaries, insights, and management reports.", path: "/schedule", link: "View Schedule →" },
