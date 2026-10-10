@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.auth import router as auth_router
 from app.api.risks import router as risk_router
 from app.api.planning import router as planning_router
+from app.agents.coordinator.router import router as coordinator_router
 
 # ---------------------------------------------------------
 # Configuration
@@ -148,6 +149,7 @@ app.include_router(risk_router)
 # ---------------------------------------------------------
 
 app.include_router(planning_router)
+app.include_router(coordinator_router)
 
 
 # ---------------------------------------------------------
