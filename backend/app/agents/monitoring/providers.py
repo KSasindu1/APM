@@ -1,11 +1,12 @@
 """Real agent API and message adapters. No example projects or fallback data."""
 
+import hashlib
+import json
+import re
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import date
-import hashlib
-import json
-from typing import Literal
+from typing import Literal, overload
 from urllib.parse import quote
 
 import httpx
@@ -22,6 +23,60 @@ class RiskAgentAPIError(ValueError):
     pass
 
 
+class RiskAgentAvailabilityError(RiskAgentAPIError):
+    """Transport, timeout, rate-limit, or server availability failure."""
+
+
+class RiskAgentIntegrityError(RiskAgentAPIError):
+    """Invalid response, project binding, or non-availability HTTP failure."""
+
+
+_CREDENTIAL_FIELDS = {
+    "principal", "credentials", "credential", "authorization", "authentication", "auth",
+    "password", "passwd", "pwd", "secret", "secrets", "token", "tokens", "key", "keys",
+    "bearer", "cookie", "cookies", "set_cookie", "auth_header", "authorization_header",
+    "api_key", "api_keys", "access_key", "access_key_id", "private_key", "secret_key",
+    "service_key", "client_secret", "access_token", "refresh_token", "id_token",
+}
+_CREDENTIAL_SUFFIXES = tuple("_" + name for name in _CREDENTIAL_FIELDS)
+_COMPACT_CREDENTIAL_FIELDS = {name.replace("_", "") for name in _CREDENTIAL_FIELDS}
+
+
+def _credential_field(key: str) -> bool:
+    normalized = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", normalized)
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalized.lower()).strip("_")
+    return (normalized.replace("_", "") in _COMPACT_CREDENTIAL_FIELDS
+            or normalized.endswith(_CREDENTIAL_SUFFIXES))
+
+
+@overload
+def sanitize_risk_context(value: str) -> str: ...
+
+
+@overload
+def sanitize_risk_context(value: JsonValue) -> JsonValue: ...
+
+
+def sanitize_risk_context(value: JsonValue) -> JsonValue:
+    """Remove credential fields without mutating source evidence or plain prose."""
+    if isinstance(value, dict):
+        return {key: sanitize_risk_context(item) for key, item in value.items()
+                if not _credential_field(key)}
+    if isinstance(value, list):
+        return [sanitize_risk_context(item) for item in value]
+    if isinstance(value, str) and value.lstrip().startswith(("{", "[", '"')):
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return value
+        # Transport envelopes and configured descriptions can contain JSON inside JSON.
+        safe = sanitize_risk_context(decoded)
+        if safe != decoded:
+            return json.dumps(safe, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return value
+
+
 class _ExternalModel(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
@@ -34,6 +89,7 @@ class _ScheduledTask(_ExternalModel):
     priority: Literal["low", "medium", "high", "critical"]
     dependencies: list[Identifier]
     status: Literal["PLANNED", "IN_PROGRESS", "COMPLETED", "BLOCKED"]
+    is_critical: bool = Field(default=False, strict=True)
 
     @field_validator("priority", mode="before")
     @classmethod
@@ -75,6 +131,7 @@ def adapt_planning_schedule(payload: dict, fetched_on: date) -> PlanningSnapshot
                 task_id=task.task_id, title=task.name,
                 start_date=task.planned_start, due_date=task.planned_end,
                 priority=task.priority, dependency_ids=task.dependencies,
+                **({"is_critical": task.is_critical} if "is_critical" in task.model_fields_set else {}),
             ) for task in supplied.schedule],
             context=deepcopy(payload), limitations=limitations,
         )
@@ -89,15 +146,22 @@ def _timeout(value: float) -> None:
 
 async def _api_request(client: httpx.AsyncClient, method: str, path: str, *,
                        timeout: float, agent: str, error_type: type[ValueError],
-                       payload: dict | None = None) -> dict:
+                       payload: dict | None = None,
+                       availability_error_type: type[ValueError] | None = None) -> dict:
     try:
         response = await client.request(method, path, json=payload, timeout=timeout,
                                         follow_redirects=False)
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        raise error_type(f"{agent} Agent API returned HTTP {exc.response.status_code}") from exc
+        status = exc.response.status_code
+        failure_type = (availability_error_type if availability_error_type is not None
+                        and (status in (408, 429) or 500 <= status < 600) else error_type)
+        raise failure_type(f"{agent} Agent API returned HTTP {status}") from exc
     except httpx.RequestError as exc:
-        raise error_type(f"{agent} Agent API request failed or timed out") from exc
+        failure_type = (availability_error_type if availability_error_type is not None
+                        and isinstance(exc, (httpx.NetworkError, httpx.TimeoutException,
+                                             httpx.RemoteProtocolError, httpx.ProxyError)) else error_type)
+        raise failure_type(f"{agent} Agent API request failed or timed out") from exc
     try:
         data = response.json()
         if not isinstance(data, dict):
@@ -148,6 +212,10 @@ class PlanningMessageProvider:
         plan = adapt_planning_schedule(message.data, self.received_on)
         if plan.project_id != project_id:
             raise PlanningAgentAPIError("Planning message project_id does not match the requested project")
+        plan.context["message_source"] = {
+            "request_id": self.payload["request_id"], "sender": self.payload["sender"],
+            "received_on": self.received_on.isoformat(), "message": deepcopy(self.payload),
+        }
         return plan
 
 
@@ -157,6 +225,8 @@ def adapt_actual_progress(payload: dict, observed_on: date) -> ActualProjectSnap
     No progress percentage is inferred from a status. The caller wraps the PDF's
     task update(s) in {project_id, tasks: [...]}; missing update dates use this
     observation's recording date, not a fabricated source-modification time.
+    The original payload and date bases remain in context so coverage can leave
+    actual_updated_on unknown when only a recording/observation date is supplied.
     """
     if not isinstance(payload, dict) or not isinstance(payload.get("tasks"), list):
         raise ValueError("Actual progress requires a project_id and tasks list")
@@ -183,6 +253,14 @@ def adapt_actual_progress(payload: dict, observed_on: date) -> ActualProjectSnap
     snapshot = ActualProjectSnapshot.model_validate({
         "project_id": payload["project_id"], "updated_on": updated_on,
         "observed_on": observed_on, "tasks": tasks,
+        "context": {
+            "source_payload": deepcopy(payload),
+            "snapshot_date_basis": "source_update" if payload.get("updated_on") else "observation",
+            "task_date_basis": {
+                task["task_id"]: "source_update" if source.get("updated_on") else "observation"
+                for task, source in zip(tasks, payload["tasks"])
+            },
+        },
     })
     return snapshot
 
@@ -244,21 +322,40 @@ class RiskAgentAPIProvider:
         self.today = today
 
     async def get_risks(self, project_id: str) -> RiskSnapshot:
+        return await self._get_risks(project_id, self.project_information)
+
+    async def get_risks_for_monitoring(self, project_id: str,
+                                       project_information: str) -> RiskSnapshot:
+        """Retain configured context alongside Monitoring's validated JSON observations."""
+        try:
+            context = json.loads(project_information)
+            if not isinstance(context, dict) or context.get("project_id") != project_id:
+                raise ValueError("Context must match the requested project")
+        except (TypeError, ValueError) as exc:
+            raise RiskAgentIntegrityError("Monitoring Risk context must be a project-bound JSON object") from exc
+        if self.project_information:
+            context["configured_project_information"] = self.project_information
+        information = json.dumps(context, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        return await self._get_risks(project_id, information)
+
+    async def _get_risks(self, project_id: str, project_information: str) -> RiskSnapshot:
         observed_on = self.today()
+        project_information = sanitize_risk_context(project_information)
         data = await _api_request(
             self.client, "POST", "/api/risk/analyse", timeout=self.timeout_seconds,
-            agent="Risk", error_type=RiskAgentAPIError, payload={
+            agent="Risk", error_type=RiskAgentIntegrityError,
+            availability_error_type=RiskAgentAvailabilityError, payload={
                 "project_id": project_id, "source_agent": "Monitoring Agent",
                 "query": "Identify current project risks relevant to project monitoring.",
-                "project_information": self.project_information, "top_k": self.top_k,
+                "project_information": project_information, "top_k": self.top_k,
             },
         )
         try:
             payload = _RiskResponse.model_validate(data)
         except ValidationError as exc:
-            raise RiskAgentAPIError("Risk Agent API returned invalid JSON or an invalid response schema") from exc
+            raise RiskAgentIntegrityError("Risk Agent API returned invalid JSON or an invalid response schema") from exc
         if payload.project_id != project_id:
-            raise RiskAgentAPIError("Risk Agent API response project_id does not match the requested project")
+            raise RiskAgentIntegrityError("Risk Agent API response project_id does not match the requested project")
         risks = []
         for item in payload.risks:
             identity = json.dumps([item.risk, item.description, item.source, item.affected_area],
@@ -273,9 +370,9 @@ class RiskAgentAPIProvider:
             ))
         try:
             return RiskSnapshot(
-                project_id=payload.project_id, updated_on=observed_on, risks=risks,
+                project_id=payload.project_id, updated_on=observed_on, observed_on=observed_on, risks=risks,
                 summary=payload.summary, evidence_used=payload.evidence_used,
                 knowledge_sources=payload.knowledge_sources,
             )
         except ValidationError as exc:
-            raise RiskAgentAPIError("Risk Agent API returned an invalid risk snapshot") from exc
+            raise RiskAgentIntegrityError("Risk Agent API returned an invalid risk snapshot") from exc

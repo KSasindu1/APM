@@ -2,16 +2,16 @@
 
 import argparse
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 from pathlib import Path
 import re
 
 import httpx
 from dotenv import dotenv_values
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, ValidationError, field_validator
 
-from .schemas import MonitoringPrincipal, MonitoringReport
+from .schemas import CalendarDate, Identifier, MonitoringPrincipal, MonitoringReport, ObservationReceipt
 from .agent import require_access
 
 
@@ -29,6 +29,7 @@ class SupabaseMonitoringSettings(BaseModel):
     url: str
     secret_key: SecretStr = Field(repr=False)
     reports_table: str = "monitoring_reports"
+    observations_table: str = "monitoring_observations"
     timeout_seconds: float = Field(default=30, gt=0, le=300, allow_inf_nan=False)
 
     def model_post_init(self, context):
@@ -38,8 +39,9 @@ class SupabaseMonitoringSettings(BaseModel):
             raise ValueError("Supabase URL must be an HTTPS server root without credentials")
         if not self.secret_key.get_secret_value().strip():
             raise ValueError("A backend Supabase secret key is required")
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", self.reports_table):
-            raise ValueError("Supabase report table must be a simple public-schema table name")
+        for table in (self.reports_table, self.observations_table):
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", table):
+                raise ValueError("Supabase Monitoring tables must be simple public-schema table names")
         self.url = self.url.rstrip("/")
 
     @classmethod
@@ -52,12 +54,14 @@ class SupabaseMonitoringSettings(BaseModel):
                 url=values.get("SUPABASE_URL") or "",
                 secret_key=SecretStr(values.get("SUPABASE_SECRET_KEY") or ""),
                 reports_table=values.get("SUPABASE_MONITORING_REPORTS_TABLE") or "monitoring_reports",
+                observations_table=values.get("SUPABASE_MONITORING_OBSERVATIONS_TABLE") or "monitoring_observations",
             )
         except (ValidationError, ValueError, httpx.InvalidURL):
             # Pydantic errors can include input values; never display environment inputs.
             raise SupabaseMonitoringConfigurationError(
                 "Configure a valid SUPABASE_URL, nonempty SUPABASE_SECRET_KEY, "
-                "and SUPABASE_MONITORING_REPORTS_TABLE in the backend environment"
+                "SUPABASE_MONITORING_REPORTS_TABLE and SUPABASE_MONITORING_OBSERVATIONS_TABLE "
+                "in the backend environment"
             ) from None
 
 
@@ -71,17 +75,14 @@ class _StoredReport(BaseModel):
     report: MonitoringReport
 
 
-class SupabaseMonitoringReportRepository:
-    """Caller owns the dedicated HTTP client and provides a verified principal.
+class _SupabaseMonitoringRepository:
+    """Transport only; public repository methods must authorize before calling it."""
 
-    Privileged Supabase credentials bypass RLS, so every report operation checks
-    project authorization here before making a network request.
-    """
-
-    def __init__(self, client: httpx.AsyncClient, settings: SupabaseMonitoringSettings):
+    def __init__(self, client, settings, table, resource):
         self.client = client
         self.settings = settings
-        self._url = f"{settings.url}/rest/v1/{settings.reports_table}"
+        self.resource = resource
+        self._url = f"{settings.url}/rest/v1/{table}"
 
     async def _request(self, method: str, *, params: dict | None = None,
                        row: dict | None = None) -> httpx.Response:
@@ -99,26 +100,32 @@ class SupabaseMonitoringReportRepository:
                 timeout=self.settings.timeout_seconds, follow_redirects=False,
             )
         except httpx.RequestError:
-            raise SupabaseMonitoringError("Supabase report request failed or timed out") from None
+            raise SupabaseMonitoringError(f"Supabase {self.resource} request failed or timed out") from None
         if not 200 <= response.status_code < 300:
             hint = {
                 401: "Check the backend Supabase credential.",
                 403: "Check database access and the backend credential.",
-                404: "Check that the reports table exists and is exposed in the public schema.",
-                409: "A report with this ID may already exist.",
-            }.get(response.status_code, "Check the Supabase project and reports table configuration.")
+                404: f"Check that the {self.resource}s table exists and is exposed in the public schema.",
+                409: f"A {self.resource} with this ID may already exist.",
+            }.get(response.status_code, f"Check the Supabase project and {self.resource}s table configuration.")
             raise SupabaseMonitoringError(f"Supabase returned HTTP {response.status_code}. {hint}")
         return response
 
-    @staticmethod
-    def _json_rows(response: httpx.Response) -> list:
+    def _json_rows(self, response: httpx.Response) -> list:
         try:
             rows = response.json()
             if not isinstance(rows, list):
                 raise ValueError("Expected a row list")
             return rows
         except ValueError:
-            raise SupabaseMonitoringError("Supabase returned invalid report JSON") from None
+            raise SupabaseMonitoringError(f"Supabase returned invalid {self.resource} JSON") from None
+
+
+class SupabaseMonitoringReportRepository(_SupabaseMonitoringRepository):
+    """Dedicated backend client; privileged credentials require per-operation access checks."""
+
+    def __init__(self, client: httpx.AsyncClient, settings: SupabaseMonitoringSettings):
+        super().__init__(client, settings, settings.reports_table, "report")
 
     @staticmethod
     def _validate_row(row: dict, project_id: str, report_id: str | None = None) -> MonitoringReport:
@@ -179,6 +186,94 @@ class SupabaseMonitoringReportRepository:
         """Backend operator diagnostic only: read at most one ID, without changing data."""
         response = await self._request("GET", params={"select": "report_id", "limit": "1"})
         self._json_rows(response)
+
+
+class _StoredObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observation_id: Identifier
+    project_id: Identifier
+    request_id: Identifier
+    source: Identifier
+    observed_on: CalendarDate
+    accepted_at: datetime
+    submitted_by: Identifier
+    receipt: ObservationReceipt
+
+    @field_validator("accepted_at", mode="before")
+    @classmethod
+    def timestamp_type(cls, value):
+        return ObservationReceipt.timestamp_type(value)
+
+
+class SupabaseMonitoringObservationRepository(_SupabaseMonitoringRepository):
+    """Immutable receipts, project-authorized independently of report persistence."""
+
+    _select = "observation_id,project_id,request_id,source,observed_on,accepted_at,submitted_by,receipt"
+
+    def __init__(self, client: httpx.AsyncClient, settings: SupabaseMonitoringSettings):
+        super().__init__(client, settings, settings.observations_table, "observation")
+
+    @staticmethod
+    def _validate_row(row, project_id, observation_id=None) -> ObservationReceipt:
+        try:
+            stored = _StoredObservation.model_validate(row)
+        except (ValidationError, ValueError, TypeError):
+            raise SupabaseMonitoringError("Supabase returned an invalid stored monitoring observation") from None
+        receipt = stored.receipt
+        if (stored.project_id != project_id or receipt.project_id != project_id
+                or observation_id is not None and stored.observation_id != observation_id
+                or not receipt.persisted or stored.accepted_at.utcoffset() != timedelta(0)
+                or any(getattr(stored, name) != getattr(receipt, name) for name in (
+                    "observation_id", "request_id", "source", "observed_on", "accepted_at", "submitted_by",
+                ))):
+            raise SupabaseMonitoringError("Stored observation metadata does not match the requested project/observation")
+        return receipt
+
+    async def save(self, receipt: ObservationReceipt, principal: MonitoringPrincipal) -> None:
+        require_access(principal, receipt.project_id, "monitoring:generate")
+        receipt = ObservationReceipt.model_validate(receipt)
+        if receipt.submitted_by != principal.subject:
+            raise PermissionError("Observation author must match the verified monitoring principal")
+        if not receipt.persisted:
+            raise ValueError("Only explicitly saved receipts may be persisted")
+        payload = receipt.model_dump(mode="json")
+        row = {name: payload[name] for name in (
+            "observation_id", "project_id", "request_id", "source", "observed_on", "accepted_at", "submitted_by",
+        )}
+        await self._request("POST", row={**row, "receipt": payload})
+
+    async def get(self, project_id: str, observation_id: str,
+                  principal: MonitoringPrincipal) -> ObservationReceipt | None:
+        require_access(principal, project_id, "monitoring:read")
+        TypeAdapter(Identifier).validate_python(project_id, strict=True)
+        TypeAdapter(Identifier).validate_python(observation_id, strict=True)
+        response = await self._request("GET", params={
+            "select": self._select, "project_id": f"eq.{project_id}",
+            "observation_id": f"eq.{observation_id}", "limit": "1",
+        })
+        rows = self._json_rows(response)
+        if len(rows) > 1:
+            raise SupabaseMonitoringError("Supabase returned multiple rows for one observation")
+        return self._validate_row(rows[0], project_id, observation_id) if rows else None
+
+    async def list(self, project_id: str, principal: MonitoringPrincipal,
+                   limit: int = 20) -> list[ObservationReceipt]:
+        require_access(principal, project_id, "monitoring:read")
+        TypeAdapter(Identifier).validate_python(project_id, strict=True)
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise ValueError("Observation limit must be an integer between 1 and 100")
+        response = await self._request("GET", params={
+            "select": self._select, "project_id": f"eq.{project_id}",
+            "order": "accepted_at.desc,observation_id.desc", "limit": str(limit),
+        })
+        rows = self._json_rows(response)
+        if len(rows) > limit:
+            raise SupabaseMonitoringError("Supabase returned more observations than requested")
+        receipts = [self._validate_row(row, project_id) for row in rows]
+        if len({receipt.observation_id for receipt in receipts}) != len(receipts):
+            raise SupabaseMonitoringError("Supabase returned duplicate observation IDs")
+        return receipts
 
 
 async def _check(env_file: str) -> None:

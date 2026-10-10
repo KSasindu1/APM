@@ -1,192 +1,151 @@
+import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import { adminApi, adminErrorMessage } from "../services/adminApi.js";
+import "./Admin.css";
+import "../pages/AccountAuth.css";
 
-import { useState } from "react";
-
-const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
-
-function AdminLogin({ onLoginSuccess, onBack }) {
+function AdminLogin({ onLoginSuccess, onBack, registrationNotice }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const passwordInput = useRef(null);
+  const request = useRef({ sequence: 0, controller: null, mounted: false });
+
+  useEffect(() => {
+    const current = request.current;
+    const input = passwordInput.current;
+    current.mounted = true;
+    return () => {
+      current.mounted = false;
+      current.sequence += 1;
+      current.controller?.abort();
+      current.controller = null;
+      if (input) input.value = "";
+    };
+  }, []);
+
+  function cancelAndClear() {
+    request.current.sequence += 1;
+    request.current.controller?.abort();
+    request.current.controller = null;
+    setUsername("");
+    setPassword("");
+    setError("");
+    setLoading(false);
+  }
+
+  async function handleBack() {
+    cancelAndClear();
+    try { await onBack?.(); } catch { /* Navigation must not leak callback rejections. */ }
+  }
+
   async function handleSubmit(event) {
     event.preventDefault();
-
+    if (loading) return;
+    const input = passwordInput.current;
+    input.setCustomValidity(Array.from(password).length > 256 ? "Use at most 256 Unicode characters." : "");
+    if (!event.currentTarget.reportValidity()) return;
+    request.current.controller?.abort();
+    const controller = new AbortController();
+    const sequence = ++request.current.sequence;
+    request.current.controller = controller;
+    const isCurrent = () => request.current.mounted && request.current.sequence === sequence && !controller.signal.aborted;
     setError("");
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          username: username.trim(),
-          password,
-        }),
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.detail || "Login failed. Please try again.");
-      }
-
-      if (!data.access_token || data.role !== "admin") {
-        throw new Error("The server did not return a valid admin session.");
-      }
-
-      onLoginSuccess(data);
-    } catch (err) {
-      setError(
-        err.message ||
-          "Unable to connect to the server. Check that the backend is running."
-      );
-    } finally {
+      const data = await adminApi.login({ username: username.trim(), password }, { signal: controller.signal });
+      if (!isCurrent()) return;
+      setUsername("");
+      setPassword("");
       setLoading(false);
+      request.current.sequence += 1;
+      request.current.controller = null;
+      await onLoginSuccess?.(data);
+    } catch (err) {
+      if (isCurrent() && err?.name !== "AbortError") {
+        setPassword("");
+        setError(adminErrorMessage(err, { login: true }));
+      }
+    } finally {
+      if (isCurrent()) {
+        request.current.controller = null;
+        setLoading(false);
+      }
     }
   }
 
   return (
-    <main
-      style={{
-        minHeight: "100vh",
-        display: "grid",
-        placeItems: "center",
-        padding: "24px",
-        background: "#f8fafc",
-        fontFamily: '"Segoe UI", Arial, sans-serif',
-      }}
-    >
-      <section
-        style={{
-          width: "100%",
-          maxWidth: "420px",
-          padding: "36px",
-          border: "1px solid #e2e8f0",
-          borderRadius: "20px",
-          background: "#ffffff",
-          boxShadow: "0 20px 50px rgba(15, 23, 42, 0.08)",
-        }}
-      >
-        <div
-          style={{
-            display: "grid",
-            placeItems: "center",
-            width: "54px",
-            height: "54px",
-            marginBottom: "24px",
-            borderRadius: "14px",
-            background: "linear-gradient(135deg, #4f46e5, #7c3aed)",
-            color: "#ffffff",
-            fontWeight: 800,
-            fontSize: "18px",
-          }}
-        >
+    <main className="admin-login">
+      <section className="admin-login__card">
+        <div className="admin-login__brand-mark">
           AP
         </div>
 
-        <p
-          style={{
-            margin: "0 0 8px",
-            color: "#5b4de8",
-            fontSize: "12px",
-            fontWeight: 800,
-            letterSpacing: "1.2px",
-          }}
-        >
+        <p className="admin-eyebrow">
           PROJECTFLOW AI
         </p>
 
-        <h1
-          style={{
-            margin: "0 0 10px",
-            color: "#172033",
-            fontSize: "28px",
-            lineHeight: 1.25,
-          }}
-        >
+        <h1 className="admin-title admin-login__title">
           Administrator login
         </h1>
 
-        <p
-          style={{
-            margin: "0 0 28px",
-            color: "#64748b",
-            fontSize: "14px",
-            lineHeight: 1.6,
-          }}
-        >
+        <p className="admin-intro admin-login__intro">
           Sign in to manage project documents and access the admin dashboard.
         </p>
 
-        <form onSubmit={handleSubmit}>
+        {registrationNotice && <p className="account-auth__notice" role="status">Administrator account created. Sign in with your new credentials; registration does not start a session.</p>}
+
+        <form onSubmit={handleSubmit} className="admin-login__form" aria-busy={loading} onInvalid={event => event.target.setAttribute("aria-invalid", "true")} onInput={event => event.target.removeAttribute("aria-invalid")}>
           <label
             htmlFor="admin-username"
-            style={{
-              display: "block",
-              marginBottom: "8px",
-              color: "#334155",
-              fontSize: "13px",
-              fontWeight: 600,
-            }}
+            className="admin-label"
           >
             Username
           </label>
 
           <input
             id="admin-username"
+            disabled={loading}
             name="username"
             type="text"
             autoComplete="username"
             value={username}
             onChange={(event) => setUsername(event.target.value)}
             required
-            maxLength={100}
+            maxLength={200}
             placeholder="Enter admin username"
-            style={inputStyle}
+            className="admin-input"
           />
 
           <label
             htmlFor="admin-password"
-            style={{
-              display: "block",
-              margin: "18px 0 8px",
-              color: "#334155",
-              fontSize: "13px",
-              fontWeight: 600,
-            }}
+            className="admin-label admin-login__password-label"
           >
             Password
           </label>
 
           <input
             id="admin-password"
+            ref={passwordInput}
+            disabled={loading}
             name="password"
             type="password"
             autoComplete="current-password"
             value={password}
-            onChange={(event) => setPassword(event.target.value)}
+            onChange={(event) => { event.target.setCustomValidity(""); setPassword(event.target.value); }}
             required
-            maxLength={256}
+            maxLength={512}
             placeholder="Enter admin password"
-            style={inputStyle}
+            className="admin-input"
           />
 
           {error && (
             <p
               role="alert"
-              style={{
-                marginTop: "16px",
-                padding: "12px",
-                borderRadius: "8px",
-                background: "#fef2f2",
-                color: "#b91c1c",
-                fontSize: "13px",
-                lineHeight: 1.5,
-              }}
+              className="admin-message admin-message--error"
             >
               {error}
             </p>
@@ -195,38 +154,22 @@ function AdminLogin({ onLoginSuccess, onBack }) {
           <button
             type="submit"
             disabled={loading}
-            style={{
-              width: "100%",
-              marginTop: "24px",
-              padding: "14px",
-              border: 0,
-              borderRadius: "10px",
-              background: loading
-                ? "#a5b4fc"
-                : "linear-gradient(135deg, #4f46e5, #7c3aed)",
-              color: "#ffffff",
-              fontSize: "14px",
-              fontWeight: 700,
-              cursor: loading ? "wait" : "pointer",
-            }}
+            className="admin-button admin-button--primary admin-login__submit"
           >
             {loading ? "Signing in..." : "Sign in as administrator"}
           </button>
+          {loading && <p className="account-auth__hint" role="status">Checking administrator credentials…</p>}
         </form>
+
+        <nav className="account-auth__links" aria-label="Account options">
+          <p>Have a private invitation? <Link to="/admin/signup" onClick={cancelAndClear}>Create an administrator account</Link></p>
+          <p><Link to="/login" onClick={cancelAndClear}>User sign-in</Link> · <Link to="/signup" onClick={cancelAndClear}>Create a user account</Link></p>
+        </nav>
 
         <button
           type="button"
-          onClick={onBack}
-          style={{
-            width: "100%",
-            marginTop: "16px",
-            padding: "10px",
-            border: 0,
-            background: "transparent",
-            color: "#64748b",
-            fontSize: "13px",
-            cursor: "pointer",
-          }}
+          onClick={handleBack}
+          className="admin-button admin-button--quiet admin-login__back"
         >
           Back to APM home
         </button>
@@ -235,15 +178,5 @@ function AdminLogin({ onLoginSuccess, onBack }) {
   );
 }
 
-const inputStyle = {
-  width: "100%",
-  padding: "12px 13px",
-  border: "1px solid #cbd5e1",
-  borderRadius: "9px",
-  outlineColor: "#6366f1",
-  background: "#ffffff",
-  color: "#172033",
-  fontSize: "14px",
-};
 
 export default AdminLogin;

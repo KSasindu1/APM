@@ -1,361 +1,222 @@
-
 from __future__ import annotations
 
 import logging
-import secrets
+from collections.abc import Callable
+from typing import Annotated, Any
 
-from fastapi import (
-    APIRouter,
-    Header,
-    HTTPException,
-    status,
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.core.account_security import canonical_username
+from app.core.project_access import (
+    ProjectActor,
+    require_planning_service,
+    require_project_actor,
+    require_project_admin,
 )
-
-from app.core.config import get_settings
+from app.core.project_access import verify_api_key as verify_api_key
 from app.model.planning import (
     AgentMessage,
     AgentMessageResponse,
     ProjectPlanningRequest,
     ScheduleResponse,
 )
-from app.repository.planning_repository import (
-    PlanningRepository,
-)
-from app.services.planning_service import (
-    PlanningService,
-)
+from app.repository.planning_repository import PlanningRepository, ProjectScheduleExists
+from app.services.account_store import get_account_store
+from app.services.planning_service import PlanningService
 
 
 logger = logging.getLogger(__name__)
-
-
 router = APIRouter(
     prefix="/api/planning",
     tags=["Planning & Scheduling Agent"],
 )
-
-
 planning_service = PlanningService()
 planning_repository = PlanningRepository()
 
 
-def verify_api_key(
-    x_api_key: str | None,
-) -> None:
+class ProjectOwnerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
 
-    settings = get_settings()
+    username: str = Field(min_length=3, max_length=50)
 
-    expected_key = settings.planning_api_key
 
-    # API key is optional in development.
-    if not expected_key:
-        return
-
-    if not x_api_key:
-
+def _repository_call(operation: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    try:
+        return operation(*args, **kwargs)
+    except ProjectScheduleExists:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="API key required.",
-        )
-
-    if not secrets.compare_digest(
-        x_api_key,
-        expected_key,
-    ):
-
+            status.HTTP_409_CONFLICT, "Schedule already exists."
+        ) from None
+    except Exception:
+        logger.exception("Planning ownership storage is unavailable.")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key.",
-        )
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Project storage is unavailable."
+        ) from None
+
+
+def _schedule_not_found() -> HTTPException:
+    return HTTPException(status.HTTP_404_NOT_FOUND, "Schedule not found.")
+
+
+async def _generate_schedule(request: ProjectPlanningRequest) -> ScheduleResponse:
+    try:
+        return await planning_service.create_schedule_with_risk(request)
+    except ValueError:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Invalid planning request."
+        ) from None
+    except Exception:
+        logger.exception("Unable to generate schedule.")
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR, "Unable to generate schedule."
+        ) from None
 
 
 @router.get("/health")
 async def planning_health():
-
     return {
         "agent": "Planning & Scheduling Agent",
         "status": "healthy",
     }
 
 
-@router.post(
-    "/schedule",
-    response_model=ScheduleResponse,
-)
+@router.post("/schedule", response_model=ScheduleResponse)
 async def create_schedule(
     request: ProjectPlanningRequest,
-    x_api_key: str | None = Header(
-        default=None,
-        alias="X-API-Key",
-    ),
+    actor: Annotated[ProjectActor, Depends(require_project_actor)],
 ):
-
-    verify_api_key(x_api_key)
-
-    try:
-
-        # ADDED: Generate plan and request risk analysis.
-        result = await (
-            planning_service.create_schedule_with_risk(
-                request
-            )
+    if actor.role != "service":
+        # Check only uniqueness before generation; never expose the existing payload.
+        existing = _repository_call(
+            planning_repository.get, request.project_id, owner_user_id=None,
         )
+        if existing is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "Schedule already exists.")
 
-        planning_repository.save(result)
-
-        return result
-
-    except ValueError as exc:
-
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-
-    except RuntimeError as exc:
-
-        logger.exception(
-            "Planning repository/configuration error."
+    result = await _generate_schedule(request)
+    if actor.role == "service":
+        # Retain the trusted service upsert contract; save must preserve any owner.
+        _repository_call(planning_repository.save, result)
+    else:
+        # INSERT also enforces uniqueness when another creator wins during generation.
+        _repository_call(
+            planning_repository.create, result, owner_user_id=actor.user_id,
         )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
-        ) from exc
-
-    except Exception as exc:
-
-        logger.exception(
-            "Unable to create schedule."
-        )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to create schedule.",
-        ) from exc
-
-
-@router.get(
-    "/schedule/{project_id}",
-    response_model=ScheduleResponse,
-)
-async def get_schedule(
-    project_id: str,
-    x_api_key: str | None = Header(
-        default=None,
-        alias="X-API-Key",
-    ),
-):
-
-    verify_api_key(x_api_key)
-
-    try:
-
-        result = planning_repository.get(
-            project_id
-        )
-
-    except RuntimeError as exc:
-
-        logger.exception(
-            "Supabase configuration/repository error."
-        )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(exc),
-        ) from exc
-
-    except Exception as exc:
-
-        logger.exception(
-            "Unable to retrieve schedule."
-        )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to retrieve schedule.",
-        ) from exc
-
-    if not result:
-
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Schedule not found.",
-        )
-
     return result
 
 
-@router.get(
-    "/schedules",
-    response_model=list[ScheduleResponse],
-)
-async def get_all_schedules(
-    x_api_key: str | None = Header(
-        default=None,
-        alias="X-API-Key",
-    ),
+@router.get("/schedule/{project_id}", response_model=ScheduleResponse)
+async def get_schedule(
+    project_id: str,
+    actor: Annotated[ProjectActor, Depends(require_project_actor)],
 ):
-
-    verify_api_key(x_api_key)
-
-    try:
-
-        return planning_repository.get_all()
-
-    except Exception as exc:
-
-        logger.exception(
-            "Unable to retrieve schedules."
-        )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to retrieve schedules.",
-        ) from exc
+    result = _repository_call(
+        planning_repository.get, project_id, owner_user_id=actor.owner_filter,
+    )
+    if result is None:
+        raise _schedule_not_found()
+    return result
 
 
-@router.put(
-    "/schedule/{project_id}",
-    response_model=ScheduleResponse,
-)
+@router.get("/schedules", response_model=list[ScheduleResponse])
+async def get_all_schedules(
+    actor: Annotated[ProjectActor, Depends(require_project_actor)],
+):
+    return _repository_call(
+        planning_repository.get_all, owner_user_id=actor.owner_filter,
+    )
+
+
+@router.put("/schedule/{project_id}", response_model=ScheduleResponse)
 async def update_schedule(
     project_id: str,
     request: ProjectPlanningRequest,
-    x_api_key: str | None = Header(
-        default=None,
-        alias="X-API-Key",
-    ),
+    actor: Annotated[ProjectActor, Depends(require_project_actor)],
 ):
-
-    verify_api_key(x_api_key)
+    existing = _repository_call(
+        planning_repository.get, project_id, owner_user_id=actor.owner_filter,
+    )
+    if existing is None:
+        raise _schedule_not_found()
 
     if project_id != request.project_id:
-
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Project ID in URL and request body "
-                "must match."
-            ),
+            status.HTTP_400_BAD_REQUEST,
+            "Project ID in URL and request body must match.",
         )
 
-    try:
-
-        existing = planning_repository.get(
-            project_id
-        )
-
-        if existing is None:
-
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Schedule not found.",
-            )
-
-        # ADDED: Risk analysis on updated plans too.
-        result = await (
-            planning_service.create_schedule_with_risk(
-                request
-            )
-        )
-
-        updated = planning_repository.update(
-            project_id,
-            result,
-        )
-
-        if updated is None:
-
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Schedule not found.",
-            )
-
-        return updated
-
-    except HTTPException:
-        raise
-
-    except ValueError as exc:
-
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
-        ) from exc
-
-    except Exception as exc:
-
-        logger.exception(
-            "Unable to update schedule."
-        )
-
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to update schedule.",
-        ) from exc
+    result = await _generate_schedule(request)
+    updated = _repository_call(
+        planning_repository.update, project_id, result, owner_user_id=actor.owner_filter,
+    )
+    if updated is None:
+        raise _schedule_not_found()
+    return updated
 
 
-@router.delete(
-    "/schedule/{project_id}"
-)
+@router.delete("/schedule/{project_id}")
 async def delete_schedule(
     project_id: str,
-    x_api_key: str | None = Header(
-        default=None,
-        alias="X-API-Key",
-    ),
+    actor: Annotated[ProjectActor, Depends(require_project_actor)],
 ):
+    deleted = _repository_call(
+        planning_repository.delete, project_id, owner_user_id=actor.owner_filter,
+    )
+    if not deleted:
+        raise _schedule_not_found()
+    return {"project_id": project_id, "deleted": True}
 
-    verify_api_key(x_api_key)
+
+@router.put("/schedule/{project_id}/owner")
+async def assign_schedule_owner(
+    project_id: str,
+    request: ProjectOwnerRequest,
+    actor: Annotated[ProjectActor, Depends(require_project_admin)],
+):
+    existing = _repository_call(
+        planning_repository.get, project_id, owner_user_id=actor.owner_filter,
+    )
+    if existing is None:
+        raise _schedule_not_found()
 
     try:
+        username = canonical_username(request.username)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid owner username.") from None
 
-        deleted = planning_repository.delete(
-            project_id
-        )
-
-    except Exception as exc:
-
-        logger.exception(
-            "Unable to delete schedule."
-        )
-
+    try:
+        account = get_account_store().find(username)
+    except Exception:
+        logger.exception("Project ownership account storage is unavailable.")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Unable to delete schedule.",
-        ) from exc
+            status.HTTP_503_SERVICE_UNAVAILABLE, "Project storage is unavailable."
+        ) from None
 
-    if not deleted:
-
+    if account is None or not account.active or account.role != "user":
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Schedule not found.",
+            status.HTTP_400_BAD_REQUEST, "An active regular user is required."
         )
 
+    assigned = _repository_call(
+        planning_repository.assign_owner, project_id, account.user_id,
+    )
+    if not assigned:
+        raise _schedule_not_found()
     return {
         "project_id": project_id,
-        "deleted": True,
+        "owner_user_id": account.user_id,
+        "owner_username": account.username,
     }
 
 
-@router.post(
-    "/message",
-    response_model=AgentMessageResponse,
-)
+@router.post("/message", response_model=AgentMessageResponse)
 async def handle_agent_message(
     message: AgentMessage,
-    x_api_key: str | None = Header(
-        default=None,
-        alias="X-API-Key",
-    ),
+    actor: Annotated[ProjectActor, Depends(require_planning_service)],
 ):
-
-    verify_api_key(x_api_key)
-
     if message.action != "CREATE_SCHEDULE":
-
         return AgentMessageResponse(
             sender="planning_agent",
             receiver=message.sender,
@@ -364,67 +225,51 @@ async def handle_agent_message(
             status="failed",
             error={
                 "code": "UNSUPPORTED_ACTION",
-                "message": (
-                    f"Unsupported action: "
-                    f"{message.action}"
-                ),
+                "message": f"Unsupported action: {message.action}",
             },
         )
 
     try:
-
-        request = ProjectPlanningRequest(
-            **message.data
-        )
-
-        # ADDED: Risk analysis for agent-to-agent requests.
-        result = await (
-            planning_service.create_schedule_with_risk(
-                request
-            )
-        )
-
-        planning_repository.save(result)
-
-        return AgentMessageResponse(
-            sender="planning_agent",
-            receiver=message.sender,
-            action="SCHEDULE_CREATED",
-            request_id=message.request_id,
-            status="success",
-            data=result.model_dump(
-                mode="json"
-            ),
-        )
-
-    except ValueError as exc:
-
+        request = ProjectPlanningRequest(**message.data)
+        result = await planning_service.create_schedule_with_risk(request)
+    except ValueError:
         return AgentMessageResponse(
             sender="planning_agent",
             receiver=message.sender,
             action="SCHEDULE_CREATED",
             request_id=message.request_id,
             status="failed",
-            error={
-                "code": "PLANNING_ERROR",
-                "message": str(exc),
-            },
+            error={"code": "PLANNING_ERROR", "message": "Invalid planning request."},
         )
-
     except Exception:
-
-        logger.exception(
-            "Planning agent-to-agent request failed."
-        )
-
+        logger.exception("Planning agent-to-agent request failed.")
         return AgentMessageResponse(
             sender="planning_agent",
             receiver=message.sender,
             action="SCHEDULE_CREATED",
             request_id=message.request_id,
             status="failed",
-            error={
-                "code": "INTERNAL_ERROR",
-                "message": "Planning agent failed.",
-            },
+            error={"code": "INTERNAL_ERROR", "message": "Planning agent failed."},
         )
+
+    try:
+        _repository_call(planning_repository.save, result)
+    except HTTPException as exc:
+        response = AgentMessageResponse(
+            sender="planning_agent",
+            receiver=message.sender,
+            action="SCHEDULE_CREATED",
+            request_id=message.request_id,
+            status="failed",
+            error={"code": "INTERNAL_ERROR", "message": "Planning agent failed."},
+        )
+        return JSONResponse(status_code=exc.status_code, content=response.model_dump(mode="json"))
+
+    return AgentMessageResponse(
+        sender="planning_agent",
+        receiver=message.sender,
+        action="SCHEDULE_CREATED",
+        request_id=message.request_id,
+        status="success",
+        data=result.model_dump(mode="json"),
+    )
