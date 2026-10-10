@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { createSchedule } from "../services/planningApi";
 
 function getToday() {
@@ -73,14 +73,19 @@ function ConfidenceBanner({ responsibleAi }) {
 }
 
 function Planning() {
-  const [form, setForm] = useState({
-    project_id: "",
-    project_name: "",
-    objective: "",
-    start_date: getToday(),
-    deadline: "",
+  const location = useLocation();
+  const draft = location.state?.coordinatorDraft;
+  const [form, setForm] = useState(() => ({
+    project_id: draft?.project_id || "",
+    project_name: draft?.project_name || "",
+    objective: draft?.objective || "",
+    start_date: draft?.start_date || getToday(),
+    deadline: draft?.deadline || "",
+    tasks: Array.isArray(draft?.tasks) ? draft.tasks : [],
+    resources: Array.isArray(draft?.resources) ? draft.resources : [],
+    risks: Array.isArray(draft?.risks) ? draft.risks : [],
     use_llm: true,
-  });
+  }));
 
   const [projectIdTouched, setProjectIdTouched] =
     useState(false);
@@ -196,6 +201,12 @@ function Planning() {
           className="planning-form-card"
           onSubmit={handleSubmit}
         >
+          {draft && <div className="confidence-banner tier-provided" role="status">
+            <div className="confidence-banner-heading">Inputs received from Coordinator</div>
+            <p>Review the prefilled details, then submit this form to generate the plan.</p>
+            {form.resources.length > 0 && <p>Resources: {form.resources.map((resource) => `${resource.name} (capacity: ${resource.capacity})`).join(", ")}</p>}
+            {form.tasks.length > 0 && <p>Supplied tasks: {form.tasks.map((task) => `${task.name} (${task.duration_days} days)`).join(", ")}</p>}
+          </div>}
 
           <div className="form-row">
 
