@@ -78,14 +78,17 @@ Health makes **no external calls** and echoes no keys, tokens, URLs, or identiti
 | `MONITORING_PLANNING_API_KEY` | Optional standalone-mode Planning-provider key; never supplied by the browser or sent to Risk/storage |
 | `MONITORING_RISK_BASE_URL` | Standalone mode only: trusted Risk server root; not needed for shared-app calls |
 | `MONITORING_RISK_FAILURE_POLICY` | `fail` by default; `report_unknown` explicitly permits an unavailable-Risk report with coverage/warnings |
-| `MONITORING_PROVIDER_TIMEOUT_SECONDS` | Provider/storage timeout, default `30`; finite number greater than 0 and at most 300 |
+| `MONITORING_PROVIDER_TIMEOUT_SECONDS` | Provider/storage/LLM timeout, default `30`; finite number greater than 0 and at most 300 |
+| `GROQ_API_KEY` | Existing backend-only Groq credential, also used directly by Monitoring for summary fact selection |
+| `GROQ_MODEL` | Existing Groq model setting; defaults to `openai/gpt-oss-120b`; must support structured JSON-schema output |
+| `MONITORING_LLM_ENABLED` | `true` by default; `false` disables Monitoring's own Groq call without changing Risk settings; `1`/`0` are also accepted |
 | `MONITORING_CORS_ORIGINS` | Comma-separated explicit frontend origins; defaults to `http://localhost:5173,http://127.0.0.1:5173` |
 | `SUPABASE_URL` | Optional existing Supabase HTTPS server root |
 | `SUPABASE_SECRET_KEY` | Optional existing **backend-only** Supabase credential |
 | `SUPABASE_MONITORING_REPORTS_TABLE` | Optional public-schema table name; defaults to `monitoring_reports` |
 | `SUPABASE_MONITORING_OBSERVATIONS_TABLE` | Optional public-schema table name; defaults to `monitoring_observations`; uses the same backend Supabase settings, not a separate observation URL |
 
-Provider URLs must be HTTPS server roots, or explicitly `http://localhost` / `http://127.0.0.1` with an optional development port. Credentials, paths, queries, fragments, and external plaintext HTTP are rejected. Destinations cannot be supplied in API bodies. Redirects are not followed, proxy-environment configuration is not used, and each request owns separate Planning, Risk, and database clients. Browser Authorization is never forwarded upstream.
+Provider URLs must be HTTPS server roots, or explicitly `http://localhost` / `http://127.0.0.1` with an optional development port. Credentials, paths, queries, fragments, and external plaintext HTTP are rejected. Destinations cannot be supplied in API bodies. Redirects are not followed, proxy-environment configuration is not used, and each request owns separate Planning, Risk, Groq, and database clients. Browser Authorization is never forwarded upstream.
 
 In shared mode, the application's existing `CORS_ORIGINS` middleware governs browser access. `MONITORING_CORS_ORIGINS` applies only to the optional standalone application, which accepts explicit origins, Authorization/Content-Type headers and GET/POST methods with `allow_credentials=false`. CORS is browser policy, **not authorization**. Invalid URLs/CORS/timeouts/policies produce sanitized configuration errors. Missing or invalid optional Supabase configuration leaves storage unavailable rather than preventing health or unsaved report generation.
 
@@ -228,7 +231,7 @@ Future report `as_of` dates return 422 after authorization and before local sour
 - `save_report=true` requires configured storage and an awaited successful save before the report response. A failed/timed-out save does not return a successful saved report. The default performs **no storage writes**, even when storage is configured.
 - Inline/no-actual generation does not require read permission. Stored-receipt generation requires **both** permissions before local payload factories or storage. It resolves the authorized project/ID, revalidates dates and task IDs against the **chosen current/genuinely dated Planning baseline**, and uses the existing `ActualProgressProvider`; an old receipt cannot silently authorize removed/new tasks or bypass live historical-date guards.
 - Receipt metadata is retained at `report.actual_context.observation_receipt` before report persistence/export, including caller-claimed source, verified submitter, and UTC acceptance time. The report's own request/author remain those of the generating caller, not the original observation submitter. Submitter identity is not forwarded to Risk. Acceptance time is **not** substituted for `observed_on` or genuine source updates; a receipt accepted today may support a historical report only with appropriately dated observations and Planning/Risk inputs.
-- Generation does not create/mutate a Planning schedule, call an external summarizer, automatically publish to Coordinator, or POST Planning feedback.
+- Generation may call Monitoring's own Groq summarizer as described below, independently of `include_risks`. It does not create/mutate a Planning schedule, automatically publish to Coordinator, or POST Planning feedback.
 
 ### Observation intake contract
 
@@ -281,10 +284,22 @@ A source failure is not replaced with synthetic tasks, actuals, risks, or succes
 1. A verified caller selects an authorized existing project and requests its baseline. Shared `MonitoringAccountAccess` reads through `PlanningRepository` with a fresh owner filter; standalone `PlanningAgentAPIProvider` reads **`GET /api/planning/schedule/{project_id}`**. Neither creates or mutates schedules.
 2. The caller supplies separately recorded actual task observations, or deliberately requests a report without them. Planning statuses/utilization do **not** become actual execution measurements.
 3. Monitoring validates project/date/task bindings and assesses actual freshness. Its contextual Risk adapter sends **`POST /api/risk/analyse`**, with `source_agent="Monitoring Agent"`, the project ID, monitoring-risk query, `top_k`, and serialized validated Planning/actual context, as-of/source dates, freshness, and interpretation limitations. Server credentials and caller identity are not passed as context; credential-like fields are removed recursively, including camelCase/separator spellings and JSON-encoded nested metadata. Risk operates through its public API, not shared services or model imports.
-4. Monitoring returns a direct evidence-bound report, optionally saving that exact snapshot. Risk IDs/task links, summary, evidence, knowledge sources, and recommendations remain source-attributed; task links are not guessed from `affected_area`.
+4. Monitoring calculates verified report facts, directly asks Groq to select summary fact IDs when enabled/configured, and falls back to the standard summary on failure. It returns an evidence-bound report, optionally saving that exact snapshot. Risk IDs/task links, summary, evidence, knowledge sources, and recommendations remain source-attributed; task links are not guessed from `affected_area`.
 5. A caller may retrieve a **stored** report's Coordinator envelope. It has `message_type="monitoring.report.ready"`, `sender="monitoring_reporting"`, `recipient="coordinator"`, `project_id`, `report`, and `correlation_id=report.request_id`. This is **export only**; there is no automatic Coordinator delivery or unsupported network call. Unsaved reports are not available through stored export/history routes.
 
 Including risks sends project/task observations to the configured Risk service and may invoke that service's own paid or rate-limited inference. Its deployment controls downstream privacy, cost, and availability; Monitoring does not initialize those models itself.
+
+### Direct Monitoring LLM summary
+
+Monitoring now calls **`POST https://api.groq.com/openai/v1/chat/completions`** directly for extractive summary selection. No separate NLP pipeline, document retrieval, model download, or additional server is added. The shared/standalone API uses the existing backend `GROQ_API_KEY` and `GROQ_MODEL`; leave `MONITORING_LLM_ENABLED=true` (the default). Restart the existing backend after operator configuration/code changes. Do not put keys in the browser or API request bodies.
+
+The LLM receives only verified fact IDs/text, not raw Planning/actual contexts, observation submitters, browser tokens, or database/provider credentials. A fact text can still contain private project/task information; enabling this feature sends it to Groq and adds latency, inference cost, and rate-limit exposure. The destination is fixed, redirects and environment proxies are disabled, clients are request-owned, and shared access is rechecked before disclosure.
+
+The model selects existing facts rather than inventing prose, metrics, percentages, dates, classifications, or actions. Structured responses must contain unique known fact IDs and project status; reporting restores missing actual/risk coverage facts and unavailable milestone coverage even if the selection omits them. Deterministic calculations remain authoritative. Prompt text embedded in task names is treated as data; output validation prevents it from adding new report facts.
+
+A successful selection sets `summary_method="llm_extractive"`; the UI labels it **AI-assisted summary**. Missing credentials, timeout, HTTP/rate-limit/model-schema errors, refusals, oversize input/output, or invalid selections retain `summary_method="deterministic_extractive"` with a safe fallback limitation. Explicitly setting `MONITORING_LLM_ENABLED=false` uses the standard summary without attempting Groq or adding a failure limitation. Risk's own LLM call is independent: turning off **Include risk source** does not turn off Monitoring's summary LLM, and disabling Monitoring's LLM does not disable Risk.
+
+Health adds `capabilities.llm_configured` as a configuration-only flag; it never calls Groq or claims a successful live inference. Observation intake, history/detail reads, and exports do not call the summarizer. Saved reports preserve the exact generated summary and method; no table/schema migration is needed.
 
 ### Planning message input
 
@@ -307,7 +322,7 @@ The API returns the core report unchanged, including typed `coverage`, source co
 - Missing/stale unfinished actuals have null current progress/variance; overall progress remains unknown without adequate fresh observations. Historical completion/late-start facts remain facts. Missing actuals alone are `AT_RISK`, not confirmed execution delay; a passed baseline deadline without actuals means completion is unknown.
 - Planning without real source update dates has unknown freshness. The current schedule adapter does not invent milestones, timestamps, or execution measurements from Planning analysis/status.
 - Risk omission/unavailability means unknown risk coverage, even if a count field is zero. A successful empty Risk snapshot is different from no Risk snapshot.
-- Status/threshold calculation belongs to `MonitoringSettings` and the existing analysis core. Reports are deterministic/evidence-bound by default, carry limitations, and always require human review. No independent retrieval or LLM summarizer is enabled by this API.
+- Status/threshold calculation belongs to `MonitoringSettings` and the deterministic analysis core. Summary fact selection uses Monitoring's direct Groq LLM when enabled/configured, with an evidence-bound deterministic fallback. Reports carry limitations and always require human review. No independent retrieval or separate NLP pipeline is enabled by this API.
 - `report.planning_feedback` contains `SCHEDULE_DELAY_DETECTED` artifacts for genuinely observed delays, with request correlation and dependent-task effects. These are **not posted**: Planning's existing handler does not implement this feedback/rescheduling action. Exporting a report does not establish a functioning Coordinator or feedback loop.
 
 ## Storage
@@ -344,7 +359,8 @@ Standalone factories retain `MonitoringTokenAuthenticator`; shared mode ignores 
 | `schemas.py` | Validated models, coverage, provider/repository/sink protocols |
 | `providers.py` | Real Planning HTTP/message, supplied actual-progress, and Risk HTTP adapters |
 | `analysis.py` | Deterministic progress, coverage, task/milestone/status assessment |
-| `reporting.py` | Evidence-bound summaries, report construction, passive feedback |
+| `reporting.py` | Evidence-bound summaries, required coverage facts, report construction, passive feedback |
+| `summarizer.py` | Async direct Groq fact selection, fixed destination, bounded requests, strict/sanitized output validation |
 | `storage.py` | Supabase settings/repository and read-only operator CLI |
 | `__init__.py` | Public agent/request/report/principal/settings exports |
 
@@ -362,4 +378,4 @@ python -B -m pytest app/agents/monitoring/tests -p no:cacheprovider
 
 `tests/test_api.py` guards import-time dotenv loading so protected operator `.env`/`.env.example` files are never read; subprocess import checks also guard dotenv. Configuration tests use isolated temporary files or mocked readers, and factories receive explicit settings. Use `-B` and `-p no:cacheprovider` to avoid bytecode/test-cache outputs. These guards are test-only; normal operator configuration behavior is unchanged.
 
-`tests/test_api.py` owns its API fixtures and uses `TestClient`, `ASGITransport`, injected fakes, and `MockTransport`. Existing Monitoring fixtures reject real HTTP. Tests cover configuration-only health, fail-closed auth, scopes before data access, strict/datetime input contracts, canonical adapters/context, request-owned credential isolation, explicit saves, failed storage responses, stored reads/export/project binding, legacy coverage, safe errors/CORS/URLs, shared-app routing/transport isolation, actual application bootstrap wiring with offline upstreams, and standalone import isolation from shared services/models. They do **not** establish live Planning/Risk/database connectivity, successful real database writes, browser end-to-end integration, or automatic feedback/Coordinator delivery.
+`tests/test_api.py` owns its API fixtures and uses `TestClient`, `ASGITransport`, injected fakes, and `MockTransport`. Existing Monitoring fixtures reject real HTTP. Tests cover configuration-only health, fail-closed auth, scopes before data access, strict/datetime input contracts, canonical adapters/context, request-owned credential isolation, explicit saves, failed storage responses, stored reads/export/project binding, legacy coverage, safe errors/CORS/URLs, shared-app routing/transport isolation, actual application bootstrap wiring with offline upstreams, and standalone import isolation from shared services/models. `tests/test_summarizer.py` and `tests/test_llm_api.py` exercise direct Groq transport/output validation, authorization gates, configuration, unchanged calculations, and safe fallback using offline mocks. They do **not** establish live Groq/Planning/Risk/database connectivity, successful real database writes, browser end-to-end integration, or automatic feedback/Coordinator delivery.

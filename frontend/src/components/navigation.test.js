@@ -74,6 +74,7 @@ test('shared Monitoring hides workflow and technical details while preserving pr
   assert.match(monitoring, /capabilities=\{capabilities\}/)
   assert.match(monitoring, /session\.permissions\.includes\('monitoring:generate'\)/)
   assert.match(monitoring, /admin \? 'All projects' : 'Owned projects'/)
+  assert.match(monitoring, /report\.summary_method === 'llm_extractive' \? 'AI-assisted summary' : 'Monitoring summary'/)
   assert.match(monitoring, /Human review required\.<\/strong>/)
   const css = await source('../pages/Monitoring.css')
   assert.match(css, /\.monitoring-page \.monitoring-hero \{[^}]*grid-template-columns: minmax\(0, 1fr\);/)

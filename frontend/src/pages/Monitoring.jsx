@@ -227,6 +227,7 @@ function ReportView({ report, projectId, saved, reports }) {
       <div className="monitoring-report-meta"><p>Project: {report.project_id}</p><p>As of {formatDate(report.as_of)}</p><p>Report: {report.report_id}</p><p>Generated: {plainText(report.generated_at)}</p></div>
     </div>
     <Notice><strong>Human review required.</strong> Review source coverage, warnings, and evidence before acting. This is not a verified completion forecast or an automatic Planning update.</Notice>
+    <h3>{report.summary_method === 'llm_extractive' ? 'AI-assisted summary' : 'Monitoring summary'}</h3>
     <p className="monitoring-summary">{report.summary || 'No narrative summary supplied.'}</p>
     <Coverage report={report} />
     <div className="monitoring-metrics">
