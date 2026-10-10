@@ -56,13 +56,17 @@ class Settings(BaseSettings):
 
     upload_directory: str = "data/documents"
     max_upload_size_mb: int = 10
-
+    
     # ---------------------------------------------------------
-    # Admin Authentication
+    # Planning Agent callback
     # ---------------------------------------------------------
 
-    admin_username: str = ""
-    admin_password: str = ""
+    planning_risk_results_url: str = (
+        "http://127.0.0.1:8000/api/planning/risk-results"
+    )
+
+    admin_username: str = "admin"
+    admin_password: str = "#&thvtksep26"
 
     jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"
