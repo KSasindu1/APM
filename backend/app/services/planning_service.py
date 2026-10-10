@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 from app.agents.planning.agent import PlanningAgent
@@ -58,21 +59,61 @@ class PlanningService:
         agent: PlanningAgent | None = None,
         risk_agent_client: RiskAgentClient | None = None,
     ) -> None:
-
-        self.agent = (
-            agent
-            or PlanningAgent()
+        self.agent = agent or PlanningAgent()
+        self.risk_agent_client = (
+            risk_agent_client or RiskAgentClient()
         )
 
-        # ADDED: Risk Agent client.
-        self.risk_agent_client = (
-            risk_agent_client
-            or RiskAgentClient()
+    def _get_tasks_and_source(
+        self,
+        request: ProjectPlanningRequest,
+    ) -> tuple[list[Any], str]:
+        """Generate tasks once so risk rescheduling uses the same tasks."""
+
+        if request.tasks:
+            return list(request.tasks), "user_provided"
+
+        if request.use_llm:
+            tasks = self.agent.generate_tasks(
+                project_name=request.project_name,
+                objective=request.objective,
+                start_date=request.start_date,
+                deadline=request.deadline,
+            )
+
+            if self.agent.last_generation_was_llm:
+                return list(tasks), "llm"
+
+            return list(tasks), "fallback"
+
+        return (
+            list(
+                self.agent.fallback_tasks(
+                    objective=request.objective
+                )
+            ),
+            "fallback",
         )
 
     def create_schedule(
         self,
         request: ProjectPlanningRequest,
+    ) -> ScheduleResponse:
+        """Generate the initial deterministic schedule."""
+
+        tasks, task_source = self._get_tasks_and_source(request)
+
+        return self._create_schedule_from_tasks(
+            request,
+            tasks,
+            task_source,
+        )
+
+    def _create_schedule_from_tasks(
+        self,
+        request: ProjectPlanningRequest,
+        tasks: list[Any],
+        task_source: str,
     ) -> ScheduleResponse:
 
         warnings: list[str] = []
@@ -82,86 +123,25 @@ class PlanningService:
                 "Project deadline cannot be before project start date."
             )
 
-        # --------------------------------------------
-        # 1. Determine task source
-        # --------------------------------------------
-
-        if request.tasks:
-
-            tasks = request.tasks
-            task_source = "user_provided"
-
-        elif request.use_llm:
-
-            tasks = self.agent.generate_tasks(
-                project_name=request.project_name,
-                objective=request.objective,
-                start_date=request.start_date,
-                deadline=request.deadline,
-            )
-
-            if self.agent.last_generation_was_llm:
-
-                task_source = "llm"
-
-            else:
-
-                task_source = "fallback"
-
-                warnings.append(
-                    "LLM task generation was unavailable "
-                    "or invalid. Deterministic fallback "
-                    "tasks were used."
-                )
-
-        else:
-
-            tasks = self.agent.fallback_tasks(
-                objective=request.objective
-            )
-
-            task_source = "fallback"
-
-            warnings.append(
-                "LLM generation was disabled. "
-                "Deterministic fallback tasks were used."
-            )
-
-        # --------------------------------------------
-        # 2. Validate tasks
-        # --------------------------------------------
-
         if not tasks:
-            raise ValueError(
-                "No tasks available for scheduling."
+            raise ValueError("No tasks available for scheduling.")
+
+        if task_source == "fallback":
+            warnings.append(
+                "LLM task generation was unavailable, invalid, "
+                "or disabled. Deterministic fallback tasks were used."
             )
 
-        duplicate_errors = (
-            validate_unique_task_ids(tasks)
-        )
-
+        duplicate_errors = validate_unique_task_ids(tasks)
         if duplicate_errors:
-            raise ValueError(
-                "; ".join(duplicate_errors)
-            )
+            raise ValueError("; ".join(duplicate_errors))
 
-        dependency_errors = (
-            validate_dependencies(tasks)
-        )
-
+        dependency_errors = validate_dependencies(tasks)
         if dependency_errors:
-            raise ValueError(
-                "; ".join(dependency_errors)
-            )
+            raise ValueError("; ".join(dependency_errors))
 
         if detect_dependency_cycle(tasks):
-            raise ValueError(
-                "Circular dependency detected."
-            )
-
-        # --------------------------------------------
-        # 3. Validate resources
-        # --------------------------------------------
+            raise ValueError("Circular dependency detected.")
 
         resource_ids = {
             resource.resource_id
@@ -170,19 +150,11 @@ class PlanningService:
         }
 
         for task in tasks:
-
-            if (
-                task.resource_id
-                and task.resource_id not in resource_ids
-            ):
+            if task.resource_id and task.resource_id not in resource_ids:
                 warnings.append(
                     f"Task {task.task_id} references unknown "
                     f"resource '{task.resource_id}'."
                 )
-
-        # --------------------------------------------
-        # 4. Generate schedule
-        # --------------------------------------------
 
         raw_schedule = schedule_tasks(
             tasks=tasks,
@@ -191,46 +163,18 @@ class PlanningService:
         )
 
         if not raw_schedule:
-            raise ValueError(
-                "Unable to generate a schedule."
-            )
+            raise ValueError("Unable to generate a schedule.")
 
-        # --------------------------------------------
-        # 5. Critical path
-        # --------------------------------------------
-
-        critical_path, critical_duration = (
-            calculate_critical_path(
-                raw_schedule
-            )
+        critical_path, critical_duration = calculate_critical_path(
+            raw_schedule
         )
+        critical_set = set(critical_path)
 
-        critical_set = set(
-            critical_path
-        )
-
-        # --------------------------------------------
-        # 6. Convert to response
-        # --------------------------------------------
-
-        scheduled_tasks: list[
-            ScheduledTask
-        ] = []
+        scheduled_tasks: list[ScheduledTask] = []
 
         for item in raw_schedule:
-
             task = item["task"]
-
-            is_critical = (
-                task.task_id in critical_set
-            )
-
-            rationale = self.build_rationale(
-                task=task,
-                is_critical=is_critical,
-                risk_level=item["risk_level"],
-                risk_buffer=item["risk_buffer"],
-            )
+            is_critical = task.task_id in critical_set
 
             scheduled_tasks.append(
                 ScheduledTask(
@@ -246,86 +190,53 @@ class PlanningService:
                     is_critical=is_critical,
                     risk_level=item["risk_level"],
                     risk_buffer_days=item["risk_buffer"],
-                    rationale=rationale,
+                    rationale=self.build_rationale(
+                        task=task,
+                        is_critical=is_critical,
+                        risk_level=item["risk_level"],
+                        risk_buffer=item["risk_buffer"],
+                    ),
                 )
             )
 
-        # --------------------------------------------
-        # 7. Project duration
-        # --------------------------------------------
-
-        project_end = max(
-            task.planned_end
-            for task in scheduled_tasks
-        )
+        project_end = max(t.planned_end for t in scheduled_tasks)
 
         total_duration = (
-            project_end
-            - request.start_date
+            project_end - request.start_date
         ).days + 1
 
         available_duration = (
-            request.deadline
-            - request.start_date
+            request.deadline - request.start_date
         ).days + 1
 
-        deadline_met = (
-            project_end <= request.deadline
-        )
+        deadline_met = project_end <= request.deadline
 
         delay_days = max(
             0,
-            (
-                project_end
-                - request.deadline
-            ).days,
+            (project_end - request.deadline).days,
         )
 
         if not deadline_met:
-
             warnings.append(
-                "The generated schedule exceeds the "
-                f"project deadline by {delay_days} day(s)."
+                f"The generated schedule exceeds the deadline "
+                f"by {delay_days} day(s)."
             )
-
-        # --------------------------------------------
-        # 8. Risk warnings
-        # --------------------------------------------
 
         high_risk_tasks = [
             task
             for task in scheduled_tasks
-            if task.risk_level.value
-            in {"HIGH", "CRITICAL"}
+            if task.risk_level.value in {"HIGH", "CRITICAL"}
         ]
 
         if high_risk_tasks:
-
             warnings.append(
-                f"{len(high_risk_tasks)} task(s) have "
-                "high or critical risk."
+                f"{len(high_risk_tasks)} task(s) have high or critical risk."
             )
-
-        # --------------------------------------------
-        # 9. Utilization
-        # --------------------------------------------
-
-        utilization = (
-            total_duration
-            / max(
-                1,
-                available_duration,
-            )
-        ) * 100
 
         utilization = min(
             100.0,
-            utilization,
+            total_duration / max(1, available_duration) * 100,
         )
-
-        # --------------------------------------------
-        # 10. Analysis
-        # --------------------------------------------
 
         analysis = ScheduleAnalysis(
             total_duration_days=total_duration,
@@ -334,28 +245,15 @@ class PlanningService:
             delay_days=delay_days,
             critical_path=critical_path,
             critical_path_duration_days=critical_duration,
-            utilization_percentage=round(
-                utilization,
-                2,
-            ),
+            utilization_percentage=round(utilization, 2),
             warnings=list(warnings),
         )
 
-        # --------------------------------------------
-        # 11. Responsible AI
-        # --------------------------------------------
-
         responsible_ai = ResponsibleAIInfo(
-            ai_generated=(
-                task_source == "llm"
-            ),
+            ai_generated=(task_source == "llm"),
             human_review_required=True,
-            confidence=CONFIDENCE_BY_SOURCE[
-                task_source
-            ],
-            explanation=EXPLANATION_BY_SOURCE[
-                task_source
-            ],
+            confidence=CONFIDENCE_BY_SOURCE[task_source],
+            explanation=EXPLANATION_BY_SOURCE[task_source],
             limitations=[
                 "Task duration estimates may be inaccurate.",
                 "LLM-generated tasks may require correction.",
@@ -375,132 +273,466 @@ class PlanningService:
             warnings=warnings,
         )
 
-    # =================================================
-    # ADDED: GENERATE PLAN AND REQUEST RISK ANALYSIS
-    # =================================================
-
     async def create_schedule_with_risk(
         self,
         request: ProjectPlanningRequest,
     ) -> ScheduleResponse:
         """
-        Generate and saveable plan, then send it to the
-        Risk Agent. Risk Agent failure must not prevent
-        plan generation.
-
-        A complete revised_plan response can be accepted
-        after validation. Otherwise, the original plan
-        is returned with a warning.
+        Generate tasks once, obtain risk findings, and apply
+        supported findings to the schedule.
         """
 
-        # Always generate the plan first.
-        initial_schedule = self.create_schedule(request)
+        tasks, task_source = self._get_tasks_and_source(request)
+
+        # Preserve the generated task definitions for rescheduling.
+        working_request = request.model_copy(
+            update={"tasks": tasks}
+        )
+
+        initial_schedule = self._create_schedule_from_tasks(
+            working_request,
+            tasks,
+            task_source,
+        )
 
         try:
-            risk_result = (
-                await self.risk_agent_client.send_plan(
-                    initial_schedule
-                )
+            risk_result = await self.risk_agent_client.send_plan(
+                initial_schedule
             )
 
-        except Exception as exc:
-            logger.warning(
-                "Risk Agent unavailable for project %s: %s",
+        except Exception:
+            logger.exception(
+                "Risk Agent request failed for project %s",
                 request.project_id,
-                exc,
             )
 
             return self._add_risk_warning(
                 initial_schedule,
-                (
-                    "Risk Agent analysis was unavailable. "
-                    "The original plan was generated and "
-                    "returned without external risk adjustments."
-                ),
+                "Risk Agent analysis was unavailable. "
+                "The original schedule was retained.",
             )
 
-        # The Risk Agent may return a complete revised plan.
-        # Validate it before accepting it.
-        revised_data = risk_result.get("revised_plan")
+        try:
+            return self._apply_risk_findings(
+                initial_schedule,
+                risk_result,
+                working_request,
+            )
 
-        if isinstance(revised_data, dict):
-            try:
-                revised_plan = ScheduleResponse.model_validate(
-                    revised_data
+        except Exception:
+            logger.exception(
+                "Risk Agent findings could not be applied "
+                "for project %s",
+                request.project_id,
+            )
+
+            return self._add_risk_warning(
+                initial_schedule,
+                "Risk Agent findings were received but could not "
+                "be applied. The original schedule was retained. "
+                "Check application logs for details.",
+            )
+
+    @staticmethod
+    def _apply_risk_findings(
+        schedule: ScheduleResponse,
+        risk_result: dict[str, Any],
+        request: ProjectPlanningRequest,
+    ) -> ScheduleResponse:
+        """Apply risk findings and reschedule affected dependent tasks."""
+
+        if not isinstance(risk_result, dict):
+            raise ValueError(
+                "Risk Agent response must be an object."
+            )
+
+        risks = risk_result.get("risks", [])
+
+        if not isinstance(risks, list):
+            raise ValueError(
+                "Risk Agent risks must be a list."
+            )
+
+        original_tasks = list(schedule.schedule)
+
+        if not original_tasks:
+            raise ValueError(
+                "Cannot apply risks to an empty schedule."
+            )
+
+        original_by_id = {
+            task.task_id: task
+            for task in original_tasks
+        }
+
+        if len(original_by_id) != len(original_tasks):
+            raise ValueError(
+                "Schedule contains duplicate task IDs."
+            )
+
+        request_tasks = list(request.tasks or [])
+
+        request_by_id = {
+            task.task_id: task
+            for task in request_tasks
+        }
+
+        if set(request_by_id) != set(original_by_id):
+            raise ValueError(
+                "Task definitions do not match the generated schedule."
+            )
+
+        critical_ids = {
+            task.task_id
+            for task in original_tasks
+            if task.is_critical
+        }
+
+        # FIX: Provide a safe fallback for project-level risks
+        # that do not match resource or buffer keywords.
+        #
+        # Use the critical path when available. Otherwise, use
+        # every task in the project.
+        default_affected_ids = sorted(
+            critical_ids or set(original_by_id)
+        )
+
+        buffer_additions: dict[str, int] = {}
+        resource_concerns: set[str] = set()
+        risk_messages: list[str] = []
+        recommendations: list[str] = []
+
+        for risk in risks:
+            if not isinstance(risk, dict):
+                continue
+
+            level = str(
+                risk.get("risk_level", "")
+            ).upper()
+
+            # Apply scheduling changes only for HIGH and CRITICAL risks.
+            if level not in {"HIGH", "CRITICAL"}:
+                continue
+
+            name = str(
+                risk.get("risk", "")
+            ).lower()
+
+            description = str(
+                risk.get("description", "")
+            ).lower()
+
+            recommendation = str(
+                risk.get("recommended_action", "")
+            ).strip()
+
+            task_id = risk.get("task_id")
+
+            is_resource_risk = (
+                "resource" in name
+                or "resource" in description
+            )
+
+            is_buffer_risk = any(
+                term in name or term in description
+                for term in (
+                    "buffer",
+                    "schedule slack",
+                    "schedule slippage",
+                    "zero risk buffer",
+                    "contingency",
+                )
+            )
+
+            if task_id is not None:
+                if task_id not in original_by_id:
+                    risk_messages.append(
+                        f"Risk '{risk.get('risk', 'Unknown')}' "
+                        f"references unknown task '{task_id}'."
+                    )
+                    continue
+
+                affected_ids = [task_id]
+
+            elif is_resource_risk or is_buffer_risk:
+                # Existing behavior: project-level resource and
+                # buffer risks apply to the critical path.
+                affected_ids = default_affected_ids
+
+            else:
+                # FIX: Map other project-level risks, including
+                # insufficient requirements or planning information,
+                # instead of reporting that they cannot be mapped.
+                affected_ids = default_affected_ids
+
+            if not affected_ids:
+                risk_messages.append(
+                    f"Risk '{risk.get('risk', 'Unknown')}' "
+                    "could not be mapped because the schedule "
+                    "contains no affected tasks."
+                )
+                continue
+
+            if is_resource_risk:
+                resource_concerns.update(affected_ids)
+
+            if is_buffer_risk:
+                impact = risk.get("impact_days")
+
+                requested_buffer = (
+                    impact
+                    if isinstance(impact, int)
+                    and not isinstance(impact, bool)
+                    and impact > 0
+                    else 2
                 )
 
-                if (
-                    revised_plan.project_id
-                    != initial_schedule.project_id
+                for affected_id in affected_ids:
+                    existing = (
+                        original_by_id[affected_id].risk_buffer_days
+                        or 0
+                    )
+
+                    buffer_additions[affected_id] = max(
+                        buffer_additions.get(affected_id, 0),
+                        max(0, requested_buffer - existing),
+                    )
+
+            if recommendation:
+                recommendations.append(recommendation)
+
+        # Regenerate the base schedule with the application's
+        # existing scheduling algorithm.
+        raw_schedule = schedule_tasks(
+            tasks=request_tasks,
+            start_date=request.start_date,
+            risks=list(request.risks or []),
+        )
+
+        if not raw_schedule:
+            raise ValueError(
+                "Unable to regenerate the schedule after risk analysis."
+            )
+
+        raw_by_id = {
+            item["task"].task_id: item
+            for item in raw_schedule
+        }
+
+        if set(raw_by_id) != set(request_by_id):
+            raise ValueError(
+                "Regenerated schedule does not contain the original task set."
+            )
+
+        # Recalculate dates in dependency order. When a task's end
+        # date changes, its dependent tasks are moved accordingly.
+        pending = set(raw_by_id)
+        completed: set[str] = set()
+
+        while pending:
+            progressed = False
+
+            for task_id in list(pending):
+                item = raw_by_id[task_id]
+                task = item["task"]
+                dependencies = list(task.dependencies or [])
+
+                if any(
+                    dependency not in completed
+                    for dependency in dependencies
                 ):
-                    raise ValueError(
-                        "Risk Agent returned a different project ID."
-                    )
+                    continue
 
-                if not revised_plan.schedule:
-                    raise ValueError(
-                        "Risk Agent returned an empty schedule."
-                    )
+                original_start = item["start_date"]
 
-                revised_task_ids = {
-                    task.task_id
-                    for task in revised_plan.schedule
-                }
-
-                if len(revised_task_ids) != len(
-                    revised_plan.schedule
-                ):
-                    raise ValueError(
-                        "Risk Agent returned duplicate task IDs."
-                    )
-
-                original_task_ids = {
-                    task.task_id
-                    for task in initial_schedule.schedule
-                }
-
-                if revised_task_ids != original_task_ids:
-                    raise ValueError(
-                        "Risk Agent changed the task set. "
-                        "New or removed tasks require review."
-                    )
-
-                return self._add_risk_warning(
-                    revised_plan,
+                dependency_end = max(
                     (
-                        "The Risk Agent supplied a revised plan. "
-                        "Human review is required before execution."
+                        raw_by_id[dependency]["end_date"]
+                        for dependency in dependencies
                     ),
+                    default=request.start_date - timedelta(days=1),
                 )
 
-            except Exception as exc:
-                logger.warning(
-                    "Risk Agent revised plan rejected for "
-                    "project %s: %s",
-                    request.project_id,
-                    exc,
+                earliest_start = max(
+                    request.start_date,
+                    dependency_end + timedelta(days=1),
                 )
 
-                return self._add_risk_warning(
-                    initial_schedule,
-                    (
-                        "The Risk Agent response contained an "
-                        "invalid revised plan. The original "
-                        "schedule was retained."
-                    ),
+                new_start = max(
+                    original_start,
+                    earliest_start,
                 )
 
-        # A risk assessment alone is not sufficient to safely
-        # change dates, dependencies, and critical-path data.
-        # Do not silently treat free-text advice as a schedule.
-        return self._add_risk_warning(
-            initial_schedule,
-            (
-                "Risk analysis could not be fully applied because "
-                "the Risk Agent did not return a valid revised schedule. "
-                "The original project schedule has been preserved, "
-                "and no risk-based schedule changes were applied."
-            ),
+                duration = int(item["duration"])
+
+                base_end = (
+                    new_start + timedelta(days=duration - 1)
+                )
+
+                extra_buffer = buffer_additions.get(
+                    task_id,
+                    0,
+                )
+
+                total_buffer = int(
+                    item["risk_buffer"] or 0
+                )
+
+                item["start_date"] = new_start
+
+                item["end_date"] = (
+                    base_end + timedelta(days=extra_buffer)
+                )
+
+                item["risk_buffer"] = (
+                    total_buffer + extra_buffer
+                )
+
+                completed.add(task_id)
+                pending.remove(task_id)
+                progressed = True
+
+            if not progressed:
+                raise ValueError(
+                    "Unable to reschedule tasks; dependencies may be "
+                    "cyclic or reference missing tasks."
+                )
+
+        revised_raw = list(raw_schedule)
+
+        critical_path, critical_duration = calculate_critical_path(
+            revised_raw
+        )
+
+        critical_set = set(critical_path)
+
+        revised_tasks: list[ScheduledTask] = []
+
+        for item in revised_raw:
+            task = item["task"]
+            task_id = task.task_id
+            is_critical = task_id in critical_set
+
+            rationale = PlanningService.build_rationale(
+                task=task,
+                is_critical=is_critical,
+                risk_level=item["risk_level"],
+                risk_buffer=item["risk_buffer"],
+            )
+
+            if task_id in resource_concerns:
+                rationale += (
+                    " Risk Agent identified a resource-assignment concern. "
+                    "Assign an available, qualified resource before work begins."
+                )
+
+            if buffer_additions.get(task_id, 0) > 0:
+                rationale += (
+                    " Additional contingency buffer applied following "
+                    "Risk Agent findings."
+                )
+
+            revised_tasks.append(
+                ScheduledTask(
+                    task_id=task_id,
+                    name=task.name,
+                    description=task.description,
+                    duration_days=item["duration"],
+                    priority=task.priority,
+                    dependencies=task.dependencies,
+                    planned_start=item["start_date"],
+                    planned_end=item["end_date"],
+                    resource_id=task.resource_id,
+                    is_critical=is_critical,
+                    risk_level=item["risk_level"],
+                    risk_buffer_days=item["risk_buffer"],
+                    rationale=rationale,
+                )
+            )
+
+        project_end = max(
+            task.planned_end
+            for task in revised_tasks
+        )
+
+        total_duration = (
+            project_end - request.start_date
+        ).days + 1
+
+        available_duration = (
+            request.deadline - request.start_date
+        ).days + 1
+
+        deadline_met = project_end <= request.deadline
+
+        delay_days = max(
+            0,
+            (project_end - request.deadline).days,
+        )
+
+        warnings = list(schedule.warnings or [])
+
+        applied_warning = (
+            "Risk Agent findings were applied to the schedule. "
+            "Human review is required before execution."
+        )
+
+        if applied_warning not in warnings:
+            warnings.append(applied_warning)
+
+        for message in risk_messages:
+            if message not in warnings:
+                warnings.append(message)
+
+        for recommendation in recommendations:
+            message = f"Risk Agent recommendation: {recommendation}"
+
+            if message not in warnings:
+                warnings.append(message)
+
+        if resource_concerns:
+            resource_warning = (
+                "Resource assignment is still required for these tasks: "
+                + ", ".join(sorted(resource_concerns))
+                + ". No resource IDs were invented."
+            )
+
+            if resource_warning not in warnings:
+                warnings.append(resource_warning)
+
+        if not deadline_met:
+            deadline_warning = (
+                "The risk-adjusted schedule exceeds the deadline "
+                f"by {delay_days} day(s)."
+            )
+
+            if deadline_warning not in warnings:
+                warnings.append(deadline_warning)
+
+        utilization = min(
+            100.0,
+            total_duration / max(1, available_duration) * 100,
+        )
+
+        analysis = schedule.analysis.model_copy(
+            update={
+                "total_duration_days": total_duration,
+                "available_duration_days": available_duration,
+                "deadline_met": deadline_met,
+                "delay_days": delay_days,
+                "critical_path": critical_path,
+                "critical_path_duration_days": critical_duration,
+                "utilization_percentage": round(utilization, 2),
+                "warnings": list(warnings),
+            }
+        )
+
+        return schedule.model_copy(
+            update={
+                "schedule": revised_tasks,
+                "analysis": analysis,
+                "warnings": warnings,
+            }
         )
 
     @staticmethod
@@ -508,8 +740,6 @@ class PlanningService:
         schedule: ScheduleResponse,
         warning: str,
     ) -> ScheduleResponse:
-        """Return a copy with consistent response and analysis warnings."""
-
         warnings = list(schedule.warnings or [])
 
         if warning not in warnings:
@@ -523,7 +753,7 @@ class PlanningService:
 
         return schedule.model_copy(
             update={
-                "warnings": list(warnings),
+                "warnings": warnings,
                 "analysis": analysis,
             }
         )
@@ -535,41 +765,22 @@ class PlanningService:
         risk_level,
         risk_buffer,
     ) -> str:
-
         reasons: list[str] = []
 
         if task.dependencies:
-
-            reasons.append(
-                "Scheduled after its dependencies."
-            )
-
+            reasons.append("Scheduled after its dependencies.")
         else:
+            reasons.append("Scheduled from the project start date.")
 
-            reasons.append(
-                "Scheduled from the project start date."
-            )
-
-        reasons.append(
-            f"Priority is {task.priority.value}."
-        )
+        reasons.append(f"Priority is {task.priority.value}.")
 
         if is_critical:
-
-            reasons.append(
-                "Task is part of the critical path."
-            )
+            reasons.append("Task is part of the critical path.")
 
         if risk_buffer > 0:
-
-            reasons.append(
-                f"{risk_buffer} risk-buffer day(s) added."
-            )
+            reasons.append(f"{risk_buffer} risk-buffer day(s) added.")
 
         if risk_level.value != "LOW":
-
-            reasons.append(
-                f"Risk level is {risk_level.value}."
-            )
+            reasons.append(f"Risk level is {risk_level.value}.")
 
         return " ".join(reasons)
