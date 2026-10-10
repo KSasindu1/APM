@@ -5,13 +5,15 @@ import logging
 import os
 import re
 from datetime import date
-
+from dotenv import load_dotenv
 from groq import Groq
 
 from app.agents.planning.prompts import (
     TASK_DECOMPOSITION_PROMPT,
 )
 from app.model.planning import TaskInput
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
