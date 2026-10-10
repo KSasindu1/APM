@@ -5,6 +5,7 @@ import AdminDashboard from "./admin/AdminDashboard.jsx";
 import Dashboard from "./pages/Dashboard";
 import Planning from "./pages/Planning";
 import Schedule from "./pages/Schedule";
+import Coordinator from "./pages/Coordinator";
 import "./App.css";
 import "./pages.css";
 
@@ -194,6 +195,7 @@ function App() {
         <Route path="/admin/dashboard" element={<AdminDashboardPage session={session} onLogout={() => setSession(null)} />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/planning" element={<Planning />} />
+        <Route path="/coordinator" element={<Coordinator />} />
         <Route path="/schedule" element={<Schedule />} />
         <Route path="/schedule/:projectId" element={<Schedule />} />
       </Routes>
