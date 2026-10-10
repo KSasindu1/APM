@@ -7,6 +7,10 @@ export default defineConfig({
   server: {
     open: true,
     proxy: {
+      '/api/coordinator': {
+        target: 'http://127.0.0.1:8000',
+        changeOrigin: true,
+      },
       '/api/planning': {
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
