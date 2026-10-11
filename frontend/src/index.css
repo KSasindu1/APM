@@ -1,111 +1,222 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap");
+
 :root {
-  --text: #6b6375;
-  --text-h: #08060d;
-  --bg: #fff;
-  --border: #e5e4e7;
-  --code-bg: #f4f3ec;
-  --accent: #aa3bff;
-  --accent-bg: rgba(170, 59, 255, 0.1);
-  --accent-border: rgba(170, 59, 255, 0.5);
-  --social-bg: rgba(244, 243, 236, 0.5);
-  --shadow:
-    rgba(0, 0, 0, 0.1) 0 10px 15px -3px, rgba(0, 0, 0, 0.05) 0 4px 6px -2px;
+  --ui-bg: #f6f8fc;
+  --ui-surface: #fff;
+  --ui-surface-soft: #f0f4fa;
+  --ui-ink: #1b2740;
+  --ui-muted: #5f6e85;
+  --ui-primary: #365bd6;
+  --ui-primary-hover: #2848b5;
+  --ui-primary-soft: #edf2ff;
+  --ui-border: #e0e7f1;
+  --ui-shadow: 0 8px 28px rgba(34, 55, 94, 0.055);
+  --ui-shadow-lg: 0 22px 60px rgba(34, 55, 94, 0.1);
+  --ui-radius: 20px;
+  --ui-radius-sm: 12px;
+  --ui-gutter: clamp(16px, 3vw, 40px);
+  --ui-max-width: 1320px;
+  --ui-success: #23734e;
+  --ui-warning: #925b13;
+  --ui-danger: #ad3f3a;
+  --ui-font: "Manrope", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --ui-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
 
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --heading: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  --text: var(--ui-muted);
+  --text-h: var(--ui-ink);
+  --bg: var(--ui-bg);
+  --border: var(--ui-border);
+  --code-bg: var(--ui-surface-soft);
+  --accent: var(--ui-primary);
+  --accent-bg: var(--ui-primary-soft);
+  --sans: var(--ui-font);
+  --heading: var(--ui-font);
+  --mono: var(--ui-mono);
 
-  font: 18px/145% var(--sans);
-  letter-spacing: 0.18px;
-  color-scheme: light dark;
-  color: var(--text);
-  background: var(--bg);
+  color-scheme: light;
+  font-family: var(--ui-font);
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--ui-ink);
+  background: var(--ui-bg);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-
-  @media (max-width: 1024px) {
-    font-size: 16px;
-  }
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #9ca3af;
-    --text-h: #f3f4f6;
-    --bg: #16171d;
-    --border: #2e303a;
-    --code-bg: #1f2028;
-    --accent: #c084fc;
-    --accent-bg: rgba(192, 132, 252, 0.15);
-    --accent-border: rgba(192, 132, 252, 0.5);
-    --social-bg: rgba(47, 48, 58, 0.5);
-    --shadow:
-      rgba(0, 0, 0, 0.4) 0 10px 15px -3px, rgba(0, 0, 0, 0.25) 0 4px 6px -2px;
-  }
-
-  #social .button-icon {
-    filter: invert(1) brightness(2);
-  }
-}
-
-body {
-  margin: 0;
-}
-
-#root {
-  width: 1126px;
-  max-width: 100%;
-  margin: 0 auto;
-  text-align: center;
-  border-inline: 1px solid var(--border);
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
+html {
+  min-width: 320px;
+  scroll-behavior: smooth;
+  scroll-padding-top: 24px;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  min-height: 100svh;
+  margin: 0;
+  background: var(--ui-bg);
+  color: var(--ui-ink);
+  font-family: var(--ui-font);
+}
+
+#root {
+  width: 100%;
+  min-width: 0;
+  min-height: 100vh;
+  min-height: 100svh;
+  text-align: left;
+}
+
+:where(h1, h2, h3, h4, p) {
+  margin: 0;
+}
+
 h1,
-h2 {
-  font-family: var(--heading);
-  font-weight: 500;
-  color: var(--text-h);
+h2,
+h3,
+h4 {
+  color: var(--ui-ink);
+  font-family: var(--ui-font);
+  font-weight: 800;
+  line-height: 1.3;
 }
 
 h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
+  font-size: clamp(28px, 3.5vw, 42px);
+  letter-spacing: -0.04em;
 }
+
 h2 {
   font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
+  letter-spacing: -0.025em;
 }
-p {
-  margin: 0;
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+input,
+textarea,
+select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+:where(a, button, input, textarea, select, summary):focus-visible {
+  outline: 3px solid var(--ui-primary);
+  outline-offset: 4px;
+}
+
+img,
+svg {
+  max-width: 100%;
+}
+
+img {
+  display: block;
 }
 
 code,
 .counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
+  font-family: var(--ui-mono);
 }
 
 code {
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: var(--ui-surface-soft);
+  color: var(--ui-ink);
+  font-size: 0.875em;
+  overflow-wrap: anywhere;
+}
+
+::selection {
+  background: #dce6ff;
+  color: var(--ui-ink);
+}
+
+.page {
+  width: min(100%, var(--ui-max-width));
+  min-width: 0;
+  margin: 0 auto;
+  padding: clamp(32px, 5vw, 64px) var(--ui-gutter) 72px;
+  text-align: left;
+}
+
+.page > * {
+  min-width: 0;
+}
+
+.page-header {
+  margin-bottom: clamp(24px, 3vw, 36px);
+  padding: clamp(24px, 3.5vw, 42px);
+  border: 1px solid var(--ui-border);
+  border-radius: 26px;
+  background:
+    radial-gradient(ellipse at 100% 0%, #e5edff 0%, transparent 56%),
+    radial-gradient(ellipse at 0% 100%, #f0edff 0%, transparent 48%),
+    var(--ui-surface);
+  box-shadow: var(--ui-shadow);
+  overflow-wrap: anywhere;
+}
+
+.page-header h1,
+.page-header h2 {
+  margin: 16px 0 12px;
+  font-size: clamp(28px, 3.5vw, 42px);
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.045em;
+}
+
+.page-header p {
+  max-width: 760px;
+  color: var(--ui-muted);
   font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+  line-height: 1.8;
+}
+
+@media (max-width: 600px) {
+  .page {
+    padding-bottom: 48px;
+  }
+
+  .page-header {
+    padding: 24px 20px;
+    border-radius: var(--ui-radius);
+  }
+
+  .page-header p {
+    font-size: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
 }

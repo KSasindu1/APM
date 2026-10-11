@@ -1,0 +1,74 @@
+/* Scoped to the Coordinator; mirrors Planning/Schedule's palette and typography. */
+.coord-summary { text-align: left; margin: 20px 0; }
+.coord-summary dt { font-size: 13px; font-weight: 800; margin-top: 18px; }
+.coord-summary dd { margin: 6px 0 0; color: #6b6f7a; font-size: 14px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.coordinator-page { --coord-ink: #121826; --coord-muted: #6b6f7a; --coord-line: #e3e1da; --coord-blue: #2b4ea8; min-height: 100vh; padding: 42px max(24px, calc((100vw - 1200px)/2)) 70px; background: #f6f5f2; color: var(--coord-ink); font-family: "Manrope", system-ui, sans-serif; }
+.coord-header { margin-bottom: 32px; max-width: 780px; }
+.coordinator-page a { color: var(--coord-blue); }
+.coord-header a { display: block; margin-bottom: 28px; font-size: 13px; }
+.coord-tag { display: block; color: var(--coord-blue); font-size: 11px; letter-spacing: 1.5px; font-weight: 800; }
+.coord-header h1 { font-size: clamp(30px, 4vw, 48px); letter-spacing: -1.8px; margin: 12px 0; line-height: 1.2; }
+.coord-header p, .coord-body > p { color: var(--coord-muted); line-height: 1.7; }
+.coord-layout { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 28px; align-items: start; }
+.coord-window { border: 1px solid var(--coord-line); background: white; border-radius: 18px; overflow: hidden; box-shadow: 0 10px 36px #1720330a; }
+.coord-window-bar { display: flex; align-items: center; gap: 10px; background: #faf9f6; border-bottom: 1px solid var(--coord-line); padding: 18px 24px; font-size: 13px; font-weight: 700; }
+.coord-window-bar i { width: 9px; height: 9px; border-radius: 50%; background: #2e7d52; }
+.coord-window-bar small { margin-left: auto; color: var(--coord-muted); font-size: 10px; letter-spacing: 1px; }
+.coord-tabs { display: flex; gap: 5px; padding: 16px 24px 0; }
+.coord-tabs button { border: 0; padding: 12px 16px; border-radius: 9px; background: transparent; color: var(--coord-muted); font: inherit; font-size: 13px; }
+.coord-tabs button[aria-pressed="true"] { background: #eef2fb; color: var(--coord-blue); font-weight: 700; }
+.coord-body { padding: 28px; }
+.coord-body h2, .coord-sidebar h2 { font-size: 24px; letter-spacing: -.6px; margin: 10px 0; }
+.coordinator-page label { display: block; margin: 18px 0; font-size: 13px; font-weight: 700; }
+.coordinator-page input:not([type="checkbox"]), .coordinator-page textarea { width: 100%; display: block; border: 1px solid #d2d2d7; border-radius: 9px; padding: 12px 14px; margin-top: 8px; font: inherit; font-size: 14px; color: var(--coord-ink); background: #fdfdfc; }
+.coordinator-page input[type="date"], .coordinator-page pre { font-family: "IBM Plex Mono", monospace; }
+.coordinator-page textarea { min-height: 100px; resize: vertical; line-height: 1.7; }
+.coordinator-page textarea.coord-prompt { min-height: 250px; }
+.coordinator-page input:focus, .coordinator-page textarea:focus, .coordinator-page button:focus-visible { outline: 2px solid var(--coord-blue); outline-offset: 2px; }
+.coord-prompt-footer { display: flex; justify-content: space-between; gap: 12px; align-items: center; font-size: 11px; color: var(--coord-muted); }
+.coord-text-button { border: 0; background: transparent; color: var(--coord-blue); padding: 8px 0; font: inherit; font-size: 12px; font-weight: 700; }
+.coord-hint { background: #eef2fb; border-left: 3px solid #9bb3df; padding: 16px; margin: 22px 0; border-radius: 6px; font-size: 12px; line-height: 1.7; }
+.coord-hint p { margin: 6px 0 0; color: #52617b; }
+.coord-primary { width: 100%; border: 0; border-radius: 10px; padding: 16px; color: white; background: var(--coord-blue); font: inherit; font-size: 14px; font-weight: 700; }
+.coord-primary:hover { background: #1d3a82; }
+.coordinator-page button:disabled { opacity: .55; cursor: wait; }
+.coord-footnote, .coord-muted { font-size: 12px; color: var(--coord-muted); line-height: 1.6; margin: 10px 0; }
+.coord-footnote { text-align: center; }
+.coord-sidebar { padding: 24px 6px; }
+.coord-sidebar ol { list-style: none; padding: 0; counter-reset: steps; }
+.coord-sidebar li { position: relative; padding: 16px 0 16px 42px; counter-increment: steps; }
+.coord-sidebar li::before { content: counter(steps, decimal-leading-zero); position: absolute; left: 0; top: 15px; color: var(--coord-blue); font-size: 12px; }
+.coord-sidebar li strong { font-size: 13px; }
+.coord-sidebar li p { margin: 6px 0 0; font-size: 12px; line-height: 1.7; color: var(--coord-muted); }
+.coord-scope { border-top: 1px solid var(--coord-line); margin-top: 22px; padding-top: 22px; }
+.coord-scope > span { font-size: 10px; letter-spacing: 1px; color: var(--coord-muted); }
+.coord-scope strong { display: block; margin: 12px 0; font-size: 13px; color: var(--coord-blue); }
+.coord-scope p { font-size: 12px; color: var(--coord-muted); line-height: 1.6; }
+.coord-body fieldset { padding: 0; border: 0; min-width: 0; }
+.coord-body legend { font-size: 23px; font-weight: 800; margin-bottom: 10px; }
+.coord-dates { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.coord-section-title { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; }
+.coord-section-title h3 { font-size: 15px; }
+.coord-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px 24px; gap: 12px; align-items: center; }
+.coord-remove { border: 0; background: transparent; font-size: 24px; color: #b5472b; margin-top: 24px; }
+.coord-checkbox { display: flex !important; gap: 10px; align-items: center; line-height: 1.6; }
+.coord-task-details { margin: 22px 0; padding: 16px; background: #f6f5f2; border-radius: 8px; }
+.coordinator-page summary { cursor: pointer; font-size: 13px; font-weight: 700; }
+.coord-feedback, .coord-error { padding: 18px; border-radius: 10px; background: #eef2fb; margin-top: 20px; }
+.coord-error { background: #fff0e9; color: #913b27; }
+.coord-result { background: white; margin-top: 30px; padding: 30px; border: 1px solid var(--coord-line); border-radius: 16px; }
+.coord-recommendation { font-size: 18px; line-height: 1.7; margin: 16px 0; }
+.coord-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 24px 0; }
+.coord-metrics > div { background: #f6f5f2; padding: 20px; border-radius: 10px; }
+.coord-metrics span { display: block; font-size: 11px; color: var(--coord-muted); margin-bottom: 8px; }
+.coord-metrics strong { font-size: 20px; }
+.coord-table { overflow: auto; }
+.coordinator-page table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.coordinator-page caption { text-align: left; font-weight: 700; margin: 12px 0; }
+.coordinator-page th, .coordinator-page td { text-align: left; padding: 14px 10px; border-bottom: 1px solid var(--coord-line); }
+.coord-result details { margin: 18px 0; }
+.coord-result ul { padding-left: 22px; margin-top: 16px; }
+.coord-result li { font-size: 13px; line-height: 1.8; }
+.coordinator-page pre { overflow: auto; background: #f6f5f2; padding: 20px; font-size: 12px; }
+@media (max-width: 850px) { .coord-layout { grid-template-columns: 1fr; } .coord-sidebar { padding: 10px; } }
+@media (max-width: 520px) { .coordinator-page { padding: 24px 14px; } .coord-body { padding: 20px; } .coord-tabs { padding: 12px 12px 0; } .coord-tabs button { padding: 10px; font-size: 12px; } .coord-dates, .coord-metrics { grid-template-columns: 1fr; } .coord-result { padding: 20px; } }
