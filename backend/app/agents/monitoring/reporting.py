@@ -21,6 +21,7 @@ from .schemas import (
     PlanningSnapshot,
     RiskSnapshot,
     SummaryFact,
+    SummarySelection,
     TaskAssessment,
 )
 
@@ -148,13 +149,19 @@ async def build_report(request: MonitoringRequest, requested_by: str,
         try:
             selector_facts = [fact.model_copy(deep=True) for fact in facts]
             selection = await asyncio.wait_for(summarizer.select_facts(selector_facts), settings.provider_timeout_seconds)
+            selection = SummarySelection.model_validate(selection, strict=True)
             allowed = set(selected)
             if ("status" not in selection.fact_ids or len(set(selection.fact_ids)) != len(selection.fact_ids)
                     or not set(selection.fact_ids) <= allowed):
                 raise ValueError("Summarizer selected invalid fact IDs")
             selected = list(selection.fact_ids)
-            if "risk_coverage" in allowed and "risk_coverage" not in selected:
-                selected.append("risk_coverage")
+            # AI may prioritize findings, but it cannot hide unknown measurements.
+            required = ["coverage", "risk_coverage"]
+            if coverage is not None and coverage.milestones_status == "not_supplied":
+                required.append("milestones")
+            for fact_id in required:
+                if fact_id in allowed and fact_id not in selected:
+                    selected.append(fact_id)
             method = "llm_extractive"
         except Exception:  # noqa: BLE001 - Any selector failure must retain a deterministic report.
             limitations.append("AI fact selection unavailable or invalid; deterministic summary used")

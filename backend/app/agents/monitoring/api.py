@@ -28,13 +28,15 @@ from .providers import (
     ActualProgressProvider, PlanningAgentAPIProvider, PlanningMessageProvider, RiskAgentAPIProvider,
 )
 from .schemas import (
-    CoordinatorReportMessage, Identifier, MonitoringPrincipal, MonitoringReport,
-    MonitoringObservationRepository, MonitoringReportRepository, MonitoringRequest, MonitoringSettings,
-    ObservationReceipt, ObservationRequest, PlanningProvider, PlanningSnapshot, RiskKnowledgeProvider,
+    CoordinatorReportMessage, Identifier, MonitoringObservationRepository, MonitoringPrincipal,
+    MonitoringReport, MonitoringReportRepository, MonitoringRequest, MonitoringSettings,
+    MonitoringSummarizer, ObservationReceipt, ObservationRequest, PlanningProvider, PlanningSnapshot,
+    RiskKnowledgeProvider,
 )
 from .storage import (
     SupabaseMonitoringObservationRepository, SupabaseMonitoringReportRepository, SupabaseMonitoringSettings,
 )
+from .summarizer import GROQ_BASE_URL, GroqMonitoringSummarizer
 
 
 _PREFIX = "/api/monitoring"
@@ -125,9 +127,12 @@ class MonitoringAPISettings:
     cors_origins: tuple[str, ...] = _DEFAULT_ORIGINS
     provider_timeout_seconds: float = 30
     risk_failure_policy: Literal["fail", "report_unknown"] = "fail"
+    groq_api_key: SecretStr | None = field(default=None, repr=False)
+    groq_model: str = "openai/gpt-oss-120b"
+    llm_enabled: bool = True
 
     def __post_init__(self):
-        for name in ("auth_identities", "planning_api_key"):
+        for name in ("auth_identities", "planning_api_key", "groq_api_key"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, SecretStr):
                 if not isinstance(value, str):
@@ -141,6 +146,15 @@ class MonitoringAPISettings:
             key = self.planning_api_key.get_secret_value()
             if not key or any(ord(c) < 32 or ord(c) > 126 for c in key):
                 raise MonitoringAPIConfigurationError("Planning API key must be a nonempty HTTP header value") from None
+        if self.groq_api_key is not None:
+            key = self.groq_api_key.get_secret_value()
+            if not key or any(ord(c) < 33 or ord(c) > 126 for c in key):
+                raise MonitoringAPIConfigurationError("Groq API key must be a nonempty HTTP header value") from None
+        if (not isinstance(self.groq_model, str) or not 1 <= len(self.groq_model) <= 200
+                or any(ord(c) < 33 or ord(c) > 126 for c in self.groq_model)):
+            raise MonitoringAPIConfigurationError("Monitoring Groq model must be a nonempty model identifier") from None
+        if not isinstance(self.llm_enabled, bool):
+            raise MonitoringAPIConfigurationError("Monitoring LLM enabled must be a boolean") from None
         timeout = self.provider_timeout_seconds
         if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
                 or not math.isfinite(timeout) or not 0 < timeout <= 300):
@@ -180,6 +194,9 @@ class MonitoringAPISettings:
             except (ValueError, TypeError, httpx.InvalidURL):
                 storage = None
         origins = values.get("MONITORING_CORS_ORIGINS")
+        enabled = str(values.get("MONITORING_LLM_ENABLED", "true")).lower()
+        if enabled not in ("true", "false", "1", "0"):
+            raise MonitoringAPIConfigurationError("MONITORING_LLM_ENABLED must be true or false") from None
         return cls(
             auth_identities=SecretStr(values.get("MONITORING_AUTH_IDENTITIES") or "") if values.get("MONITORING_AUTH_IDENTITIES") else None,
             planning_base_url=values.get("MONITORING_PLANNING_BASE_URL") or None,
@@ -189,6 +206,9 @@ class MonitoringAPISettings:
             cors_origins=tuple(part.strip() for part in origins.split(",")) if origins is not None else _DEFAULT_ORIGINS,
             provider_timeout_seconds=timeout,
             risk_failure_policy=cast(Literal["fail", "report_unknown"], values.get("MONITORING_RISK_FAILURE_POLICY") or "fail"),
+            groq_api_key=SecretStr(values["GROQ_API_KEY"]) if values.get("GROQ_API_KEY") else None,
+            groq_model=values.get("GROQ_MODEL") or "openai/gpt-oss-120b",
+            llm_enabled=enabled in ("true", "1"),
         )
 
 
@@ -269,9 +289,14 @@ async def _safe_source_errors():
         raise HTTPException(502, "Monitoring source or storage request failed") from None
 
 
+class _UnavailableSummarizer:
+    async def select_facts(self, facts):
+        raise RuntimeError("Monitoring LLM is not configured")
+
+
 class _Runtime:
     def __init__(self, settings, authenticator, planning_factory, risk_factory, repository,
-                 observation_repository, client_factory, account_mode=False):
+                 observation_repository, client_factory, account_mode=False, summarizer=None):
         self.settings = settings
         self.account_mode = account_mode
         if account_mode:
@@ -285,6 +310,7 @@ class _Runtime:
         self.repository = repository
         self.observation_repository = observation_repository
         self.client_factory = client_factory
+        self.summary_provider = summarizer
         options = {"provider_timeout_seconds": settings.provider_timeout_seconds}
         if "risk_failure_policy" in MonitoringSettings.model_fields:
             options["risk_failure_policy"] = settings.risk_failure_policy
@@ -300,6 +326,8 @@ class _Runtime:
             "risk_configured": self.risk_factory is not None or self.settings.risk_base_url is not None,
             "storage_configured": self.repository is not None or self.settings.storage is not None,
             "observations_storage_configured": self.observation_repository is not None or self.settings.storage is not None,
+            "llm_configured": self.settings.llm_enabled and (
+                self.summary_provider is not None or self.settings.groq_api_key is not None),
         }
 
     async def principal(self, request: Request,
@@ -395,6 +423,28 @@ class _Runtime:
         return (self.risk_factory(client) if self.risk_factory is not None else
                 RiskAgentAPIProvider(client, timeout_seconds=self.settings.provider_timeout_seconds))
 
+    async def summarizer(self, stack, request, project_id):
+        if not self.settings.llm_enabled:
+            return None
+        provider = self.summary_provider
+        if provider is None:
+            if self.settings.groq_api_key is None:
+                return _UnavailableSummarizer()
+            client = await self.client(stack, base_url=GROQ_BASE_URL)
+            provider = GroqMonitoringSummarizer(
+                client, api_key=self.settings.groq_api_key, model=self.settings.groq_model,
+                timeout_seconds=self.settings.provider_timeout_seconds,
+            )
+        runtime = self
+
+        class AuthorizedSummarizer:
+            async def select_facts(self, facts):
+                # Planning/Risk may have taken time; recheck before external disclosure.
+                await runtime.recheck(request, project_id)
+                return await provider.select_facts(facts)
+
+        return AuthorizedSummarizer()
+
     async def reports(self, stack):
         if self.repository is not None:
             return self.repository
@@ -453,11 +503,12 @@ def create_router(
     repository: MonitoringReportRepository | None = None,
     observation_repository: MonitoringObservationRepository | None = None,
     client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
+    summarizer: MonitoringSummarizer | None = None,
     _account_mode: bool = False,
 ) -> APIRouter:
     """Reusable routes; inject server-verified auth/providers, never body identity."""
     runtime = _Runtime(settings or MonitoringAPISettings(), authenticator, planning_provider_factory,
-                       risk_provider_factory, repository, observation_repository, client_factory, _account_mode)
+                       risk_provider_factory, repository, observation_repository, client_factory, _account_mode, summarizer)
     router = APIRouter(prefix=_PREFIX, tags=["Monitoring"], route_class=_SafeMonitoringRoute)
     principal_dependency = Depends(runtime.principal)
 
@@ -626,7 +677,8 @@ def create_router(
             planning = runtime.guard_planning(planning, request)
             risk = await runtime.risk(stack) if body.include_risks else None
             repository = await runtime.reports(stack) if body.save_report else None
-            agent = MonitoringAgent(planning=planning, actual=actual, risk=risk,
+            summary_provider = await runtime.summarizer(stack, request, body.project_id)
+            agent = MonitoringAgent(planning=planning, actual=actual, risk=risk, summarizer=summary_provider,
                                     repository=repository if receipt is None and not runtime.account_mode else None,
                                     settings=runtime.agent_settings)
             report = runtime.checked_report(await agent.generate(agent_request, principal), body.project_id)
@@ -695,7 +747,7 @@ def create_shared_router(
     )
 
     def client_factory(**options):
-        # Storage has no base_url and must retain its separate network transport.
+        # Only the internal Risk origin uses ASGI; Groq and storage stay external.
         if options.get("base_url") == internal_root:
             options["transport"] = httpx.ASGITransport(app=app, raise_app_exceptions=False)
         return httpx.AsyncClient(**options)
@@ -711,6 +763,7 @@ def create_app(
     repository: MonitoringReportRepository | None = None,
     observation_repository: MonitoringObservationRepository | None = None,
     client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
+    summarizer: MonitoringSummarizer | None = None,
 ) -> FastAPI:
     """Create an isolated service, or pass settings/dependencies for offline use."""
     settings = settings if settings is not None else MonitoringAPISettings.from_env(env_file)
@@ -722,7 +775,7 @@ def create_app(
     service.include_router(create_router(
         settings, authenticator=authenticator, planning_provider_factory=planning_provider_factory,
         risk_provider_factory=risk_provider_factory, repository=repository,
-        observation_repository=observation_repository, client_factory=client_factory,
+        observation_repository=observation_repository, client_factory=client_factory, summarizer=summarizer,
     ))
 
     return service

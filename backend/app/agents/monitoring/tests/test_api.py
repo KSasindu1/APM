@@ -199,7 +199,7 @@ def test_public_health_without_auth_or_configuration():
             "agent": "Monitoring & Reporting Agent", "status": "configuration_required",
             "capabilities": {"auth_configured": False, "planning_configured": False,
                              "risk_configured": False, "storage_configured": False,
-                             "observations_storage_configured": False},
+                             "observations_storage_configured": False, "llm_configured": False},
             "live_sources_verified": False,
         }
         assert_redacted(response)
@@ -212,7 +212,7 @@ def test_health_ready_means_configuration_not_live_connectivity(harness):
     assert response.json()["status"] == "ready"
     assert response.json()["capabilities"] == {
         **dict.fromkeys(["auth_configured", "planning_configured", "risk_configured", "storage_configured"], True),
-        "observations_storage_configured": False,
+        "observations_storage_configured": False, "llm_configured": False,
     }
     assert response.json()["capabilities"]["observations_storage_configured"] is False
     assert response.json()["live_sources_verified"] is False
@@ -486,7 +486,7 @@ def test_storage_failure_prevents_success_and_publication(harness, monkeypatch):
     assert response.status_code == 502
     assert repository.reports == {}
     assert captured[0].coordinator is None
-    assert captured[0].summarizer is None
+    assert captured[0].summarizer is not None
     assert_redacted(response)
 
 
@@ -1282,7 +1282,7 @@ def test_shared_health_registers_sources_without_bypassing_auth(shared_upstreams
             "status": "ready",
             "capabilities": {"auth_configured": True, "planning_configured": True,
                              "risk_configured": True, "storage_configured": False,
-                             "observations_storage_configured": False},
+                             "observations_storage_configured": False, "llm_configured": False},
             "live_sources_verified": False,
         }
         assert_redacted(response)
@@ -1574,7 +1574,7 @@ async def test_actual_main_bootstrap_mounts_all_agents_offline(monkeypatch, shar
         assert health.json()["capabilities"] == {
             "auth_configured": True, "planning_configured": True,
             "risk_configured": True, "storage_configured": False,
-            "observations_storage_configured": False,
+            "observations_storage_configured": False, "llm_configured": False,
         }
         assert health.json()["live_sources_verified"] is False
         assert planning_headers == []
